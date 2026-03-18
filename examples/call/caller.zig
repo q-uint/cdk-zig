@@ -1,5 +1,4 @@
 const cdk = @import("cdk");
-const ic0 = cdk.ic0;
 const CallFuture = cdk.call.CallFuture;
 
 var callee_principal: ?[]const u8 = null;
@@ -22,7 +21,7 @@ fn call_greet() callconv(.c) void {
     };
 
     future.onReply(struct {
-        fn f(result: cdk.call.CallResult) void {
+        fn f(result: CallFuture.Result) void {
             switch (result) {
                 .reply => |data| cdk.replyRaw(data),
                 .reject => |r| cdk.trap(r.message),
