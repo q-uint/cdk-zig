@@ -63,17 +63,7 @@
           # zig
           zig-overlay.packages.${system}."0.15.2"
           zls
-
-          # wasm
-          wabt
-
-          # nix
-          nixfmt-rfc-style
         ];
-
-        shellHook = ''
-          echo "welcome to your nix shell"
-        '';
       };
     }
   );

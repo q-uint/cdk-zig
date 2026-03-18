@@ -5,7 +5,7 @@ const CallFuture = cdk.call.CallFuture;
 var callee_principal: ?[]const u8 = null;
 
 fn init() callconv(.c) void {
-    const arg = cdk.arg_data();
+    const arg = cdk.argData();
     if (arg.len == 0) return;
     callee_principal = cdk.principal.decode(arg) catch
         @panic("invalid principal");
@@ -21,10 +21,10 @@ fn call_greet() callconv(.c) void {
         return;
     };
 
-    future.on_reply(struct {
+    future.onReply(struct {
         fn f(result: cdk.call.CallResult) void {
             switch (result) {
-                .reply => |data| cdk.reply_raw(data),
+                .reply => |data| cdk.replyRaw(data),
                 .reject => |r| cdk.trap(r.message),
             }
         }
@@ -32,7 +32,7 @@ fn call_greet() callconv(.c) void {
 }
 
 fn greet() callconv(.c) void {
-    cdk.reply_raw("hello from caller");
+    cdk.replyRaw("hello from caller");
 }
 
 comptime {

@@ -15,6 +15,20 @@ pub const CallResult = union(enum) {
 pub const Rejection = struct {
     code: i32,
     message: []const u8,
+
+    pub fn isCleanReject(self: Rejection) bool {
+        return switch (self.code) {
+            1, 2, 3 => true, // sysFatal, sysTransient, destinationInvalid
+            else => false,
+        };
+    }
+
+    pub fn isImmediatelyRetryable(self: Rejection) bool {
+        return switch (self.code) {
+            2, 6 => true, // sysTransient, sysUnknown
+            else => false,
+        };
+    }
 };
 
 // A future representing an in-flight inter-canister call.
@@ -27,9 +41,9 @@ pub const Rejection = struct {
 // Usage:
 //
 //   const future = try CallFuture.call("aaaaa-aa", "method", args);
-//   future.on_reply(struct {
+//   future.onReply(struct {
 //       fn f(result: CallResult) void {
-//           cdk.reply_raw(result.reply);
+//           cdk.replyRaw(result.reply);
 //       }
 //   }.f);
 //
@@ -43,10 +57,24 @@ pub const CallFuture = struct {
         continuation: ?Callback = null,
     };
 
+    pub const CallOptions = struct {
+        cycles: u128 = 0,
+        timeout_seconds: ?u32 = null,
+    };
+
     pub fn call(
         callee: []const u8,
         method: []const u8,
         args: []const u8,
+    ) CallError!CallFuture {
+        return callWithOptions(callee, method, args, .{});
+    }
+
+    pub fn callWithOptions(
+        callee: []const u8,
+        method: []const u8,
+        args: []const u8,
+        options: CallOptions,
     ) CallError!CallFuture {
         const state = allocator.create(State) catch
             @panic("failed to allocate CallFuture state");
@@ -67,6 +95,16 @@ pub const CallFuture = struct {
             ic0.call_data_append(args.ptr, @intCast(args.len));
         }
 
+        if (options.cycles > 0) {
+            const high: i64 = @bitCast(@as(u64, @truncate(options.cycles >> 64)));
+            const low: i64 = @bitCast(@as(u64, @truncate(options.cycles)));
+            ic0.call_cycles_add128(high, low);
+        }
+
+        if (options.timeout_seconds) |timeout| {
+            ic0.call_with_best_effort_response(@intCast(timeout));
+        }
+
         const rc = ic0.call_perform();
         if (rc != 0) {
             allocator.destroy(state);
@@ -76,9 +114,55 @@ pub const CallFuture = struct {
         return .{ .state = state };
     }
 
+    pub fn callOneway(
+        callee: []const u8,
+        method: []const u8,
+        args: []const u8,
+    ) CallError!void {
+        return callOnewayWithOptions(callee, method, args, .{});
+    }
+
+    pub fn callOnewayWithOptions(
+        callee: []const u8,
+        method: []const u8,
+        args: []const u8,
+        options: CallOptions,
+    ) CallError!void {
+        // For one-way calls, use invalid callback indices (0).
+        ic0.call_new(
+            callee.ptr,
+            @intCast(callee.len),
+            method.ptr,
+            @intCast(method.len),
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if (args.len > 0) {
+            ic0.call_data_append(args.ptr, @intCast(args.len));
+        }
+
+        if (options.cycles > 0) {
+            const high: i64 = @bitCast(@as(u64, @truncate(options.cycles >> 64)));
+            const low: i64 = @bitCast(@as(u64, @truncate(options.cycles)));
+            ic0.call_cycles_add128(high, low);
+        }
+
+        if (options.timeout_seconds) |timeout| {
+            ic0.call_with_best_effort_response(@intCast(timeout));
+        }
+
+        const rc = ic0.call_perform();
+        if (rc != 0) {
+            return CallError.CallPerformFailed;
+        }
+    }
+
     // Register a continuation to run when the call completes.
     // The continuation receives the CallResult (reply or reject).
-    pub fn on_reply(self: CallFuture, cont: Callback) void {
+    pub fn onReply(self: CallFuture, cont: Callback) void {
         self.state.continuation = cont;
     }
 

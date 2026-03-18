@@ -1,7 +1,7 @@
 const cdk = @import("cdk");
 
 fn greet() callconv(.c) void {
-    cdk.reply_raw("hello from callee");
+    cdk.replyRaw("hello from callee");
 }
 
 comptime {
