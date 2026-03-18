@@ -1,0 +1,14 @@
+.{
+    .name = .call,
+    .version = "0.0.0",
+    .fingerprint = 0xcc8e2f3e3f576fa8,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "caller.zig",
+        "callee.zig",
+    },
+}

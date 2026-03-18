@@ -1,0 +1,6 @@
+.{
+    .name = .ic_cdk,
+    .version = "0.0.0",
+    .fingerprint = 0x42a58e5225e5a9c0,
+    .paths = .{"src"},
+}

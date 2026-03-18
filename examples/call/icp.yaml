@@ -1,0 +1,19 @@
+# Build:    zig build callee / zig build caller / zig build
+# Deploy:   icp deploy
+# Upgrade:  icp canister install <name> --mode upgrade
+# Rebuild:  icp deploy --upgrade-unchanged
+
+canisters:
+  - name: callee
+    build:
+      steps:
+        - type: script
+          commands:
+            - zig build callee && cp zig-out/bin/callee.wasm "$ICP_WASM_OUTPUT_PATH"
+
+  - name: caller
+    build:
+      steps:
+        - type: script
+          commands:
+            - zig build caller && cp zig-out/bin/caller.wasm "$ICP_WASM_OUTPUT_PATH"
