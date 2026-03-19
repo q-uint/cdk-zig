@@ -29,4 +29,19 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&install.step);
         b.step(name, "Build the " ++ name ++ " canister").dependOn(&install.step);
     }
+
+    // E2E tests
+    const pic_mod = cdk_dep.module("pocket-ic");
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("test.zig"),
+        .target = b.standardTargetOptions(.{}),
+        .optimize = b.standardOptimizeOption(.{}),
+        .imports = &.{
+            .{ .name = "pocket-ic", .module = pic_mod },
+        },
+    });
+    const t = b.addTest(.{ .root_module = test_mod });
+    t.step.dependOn(b.getInstallStep());
+    const test_step = b.step("test", "Run e2e tests");
+    test_step.dependOn(&b.addRunArtifact(t).step);
 }

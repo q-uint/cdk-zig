@@ -3,14 +3,14 @@ const CallFuture = cdk.call.CallFuture;
 
 var callee_principal: ?[]const u8 = null;
 
-fn init() callconv(.c) void {
+fn init() void {
     const arg = cdk.argData();
     if (arg.len == 0) return;
     callee_principal = cdk.principal.decode(arg) catch
         @panic("invalid principal");
 }
 
-fn call_greet() callconv(.c) void {
+fn call_greet() void {
     const callee = callee_principal orelse {
         cdk.trap("callee principal not set; pass it as init arg");
         return;
@@ -30,7 +30,7 @@ fn call_greet() callconv(.c) void {
     }.f);
 }
 
-fn greet() callconv(.c) void {
+fn greet() void {
     cdk.replyRaw("hello from caller");
 }
 

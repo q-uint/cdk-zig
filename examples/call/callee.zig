@@ -1,6 +1,6 @@
 const cdk = @import("cdk");
 
-fn greet() callconv(.c) void {
+fn greet() void {
     cdk.replyRaw("hello from callee");
 }
 

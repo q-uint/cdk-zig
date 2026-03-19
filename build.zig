@@ -5,6 +5,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/cdk.zig"),
     });
 
+    _ = b.addModule("pocket-ic", .{
+        .root_source_file = b.path("src/pocket_ic.zig"),
+    });
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -12,6 +16,7 @@ pub fn build(b: *std.Build) void {
     const test_files = [_][]const u8{
         "src/base32.zig",
         "src/principal.zig",
+        "src/pocket_ic.zig",
     };
     for (test_files) |file| {
         const t = b.addTest(.{
