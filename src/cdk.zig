@@ -6,6 +6,9 @@ pub const call = @import("call.zig");
 pub const stable = @import("stable.zig");
 const exp = @import("export.zig");
 
+pub const timers = @import("timers.zig");
+pub const executor = @import("executor.zig");
+
 pub const allocator = @import("allocator.zig").default;
 
 // Export decorators

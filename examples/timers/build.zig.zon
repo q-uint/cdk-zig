@@ -1,0 +1,13 @@
+.{
+    .name = .timers,
+    .version = "0.0.0",
+    .fingerprint = 0xe606e6afd31659ba,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "timers.zig",
+    },
+}

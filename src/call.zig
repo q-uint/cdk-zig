@@ -93,9 +93,15 @@ pub fn TypedCallFuture(comptime Codec: type, comptime Return: type) type {
 
         const Callback = *const fn (Result) void;
 
+        const WakeHandler = struct {
+            func: *const fn (usize) void,
+            data: usize,
+        };
+
         const State = struct {
             result: ?Result = null,
             continuation: ?Callback = null,
+            wake: ?WakeHandler = null,
         };
 
         pub fn call(
@@ -156,6 +162,19 @@ pub fn TypedCallFuture(comptime Codec: type, comptime Return: type) type {
             self.state.continuation = cont;
         }
 
+        // Register a wake callback instead of a reply handler.
+        // When the call completes, the wake function is invoked with the
+        // given data argument. Use getResult() to retrieve the result
+        // from a subsequent poll.
+        pub fn onWake(self: Self, func: *const fn (usize) void, data: usize) void {
+            self.state.wake = .{ .func = func, .data = data };
+        }
+
+        // Return the stored result, if the call has completed.
+        pub fn getResult(self: Self) ?Result {
+            return self.state.result;
+        }
+
         fn replyCallback(env: i32) callconv(.c) void {
             const state: *State = @ptrFromInt(@as(u32, @intCast(env)));
 
@@ -166,10 +185,7 @@ pub fn TypedCallFuture(comptime Codec: type, comptime Return: type) type {
 
             const decoded = Codec.decode(Return, data);
             state.result = .{ .reply = decoded };
-
-            if (state.continuation) |cont| {
-                cont(state.result.?);
-            }
+            invokeHandler(state);
         }
 
         fn rejectCallback(env: i32) callconv(.c) void {
@@ -182,8 +198,13 @@ pub fn TypedCallFuture(comptime Codec: type, comptime Return: type) type {
             ic0.msg_reject_msg_copy(msg.ptr, 0, @intCast(msg_size));
 
             state.result = .{ .reject = .{ .code = code, .message = msg } };
+            invokeHandler(state);
+        }
 
-            if (state.continuation) |cont| {
+        fn invokeHandler(state: *State) void {
+            if (state.wake) |w| {
+                w.func(w.data);
+            } else if (state.continuation) |cont| {
                 cont(state.result.?);
             }
         }

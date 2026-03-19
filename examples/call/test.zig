@@ -21,6 +21,18 @@ fn expectReply(result: pic.WasmResult, expected: []const u8) !void {
     }
 }
 
+fn expectReject(result: pic.WasmResult) ![]const u8 {
+    switch (result) {
+        .reply => |data| {
+            defer allocator.free(data);
+            return error.ExpectedReject;
+        },
+        .reject => |msg| {
+            return msg;
+        },
+    }
+}
+
 test "instance lifecycle" {
     var pocket = try pic.PocketIc.init(allocator, .{});
     pocket.deinit();
@@ -104,11 +116,80 @@ test "caller calls callee" {
     try pocket.installCode(callee_id, callee_wasm, "", .install);
 
     const callee_text = pic.principal.encode(callee_id);
-    defer allocator.free(callee_text);
     const caller_id = try pocket.createCanister();
     defer allocator.free(caller_id);
     try pocket.installCode(caller_id, caller_wasm, callee_text, .install);
 
     const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_greet", "");
     try expectReply(result, "hello from callee");
+}
+
+test "query non-existent method returns reject" {
+    const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
+    defer allocator.free(callee_wasm);
+
+    var pocket = try pic.PocketIc.init(allocator, .{});
+    defer pocket.deinit();
+
+    const cid = try pocket.createCanister();
+    defer allocator.free(cid);
+    try pocket.installCode(cid, callee_wasm, "", .install);
+
+    const result = try pocket.queryCall(cid, pic.principal.anonymous, "no_such_method", "");
+    const msg = try expectReject(result);
+    defer allocator.free(msg);
+    try std.testing.expect(msg.len > 0);
+}
+
+test "update non-existent method returns reject" {
+    const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
+    defer allocator.free(callee_wasm);
+
+    var pocket = try pic.PocketIc.init(allocator, .{});
+    defer pocket.deinit();
+
+    const cid = try pocket.createCanister();
+    defer allocator.free(cid);
+    try pocket.installCode(cid, callee_wasm, "", .install);
+
+    const result = try pocket.updateCall(cid, pic.principal.anonymous, "no_such_method", "");
+    const msg = try expectReject(result);
+    defer allocator.free(msg);
+    try std.testing.expect(msg.len > 0);
+}
+
+test "caller without callee principal traps on call_greet" {
+    const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
+    defer allocator.free(caller_wasm);
+
+    var pocket = try pic.PocketIc.init(allocator, .{});
+    defer pocket.deinit();
+
+    const caller_id = try pocket.createCanister();
+    defer allocator.free(caller_id);
+    // Install caller without providing a callee principal.
+    try pocket.installCode(caller_id, caller_wasm, "", .install);
+
+    const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_greet", "");
+    const msg = try expectReject(result);
+    defer allocator.free(msg);
+    try std.testing.expect(msg.len > 0);
+}
+
+test "caller calls non-existent canister" {
+    const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
+    defer allocator.free(caller_wasm);
+
+    var pocket = try pic.PocketIc.init(allocator, .{});
+    defer pocket.deinit();
+
+    // Use a bogus canister ID as the callee.
+    const caller_id = try pocket.createCanister();
+    defer allocator.free(caller_id);
+    try pocket.installCode(caller_id, caller_wasm, "aaaaa-aa", .install);
+
+    const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_greet", "");
+    const msg = try expectReject(result);
+    defer allocator.free(msg);
+    try std.testing.expect(msg.len > 0);
 }
