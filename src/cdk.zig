@@ -8,6 +8,7 @@ const exp = @import("export.zig");
 
 pub const timers = @import("timers.zig");
 pub const executor = @import("executor.zig");
+pub const profiling = @import("profiling.zig");
 
 pub const allocator = @import("allocator.zig").default;
 
@@ -254,11 +255,11 @@ pub fn stableGrow(new_pages: u64) u64 {
 }
 
 pub fn stableWrite(offset: u64, buf: []const u8) void {
-    ic0.stable64_write(@intCast(offset), buf.ptr, @intCast(buf.len));
+    ic0.stable64_write(@intCast(offset), @intCast(@intFromPtr(buf.ptr)), @intCast(buf.len));
 }
 
 pub fn stableRead(offset: u64, buf: []u8) void {
-    ic0.stable64_read(buf.ptr, @intCast(offset), @intCast(buf.len));
+    ic0.stable64_read(@intCast(@intFromPtr(buf.ptr)), @intCast(offset), @intCast(buf.len));
 }
 
 // Cost estimation

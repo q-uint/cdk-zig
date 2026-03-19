@@ -1,0 +1,13 @@
+.{
+    .name = .profiling,
+    .version = "0.0.0",
+    .fingerprint = 0xd1f08e271d65e93b,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "profiling.zig",
+    },
+}

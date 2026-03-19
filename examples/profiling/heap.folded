@@ -1,0 +1,5 @@
+compute;parse_input 96
+compute;process;validate 128
+compute;process;transform 192
+compute;process 144
+compute 288

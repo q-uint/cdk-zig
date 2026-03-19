@@ -105,6 +105,9 @@
           # zig
           zig-overlay.packages.${system}."0.15.2"
           zls
+
+          # profiling
+          flamegraph
         ];
 
         POCKET_IC_BIN = "${pocket-ic-server}/bin/pocket-ic-server";

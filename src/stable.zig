@@ -19,11 +19,11 @@ pub fn grow(new_pages: u64) StableMemoryError!u64 {
 }
 
 pub fn write(offset: u64, buf: []const u8) void {
-    ic0.stable64_write(@intCast(offset), buf.ptr, @intCast(buf.len));
+    ic0.stable64_write(@intCast(offset), @intCast(@intFromPtr(buf.ptr)), @intCast(buf.len));
 }
 
 pub fn read(offset: u64, buf: []u8) void {
-    ic0.stable64_read(buf.ptr, @intCast(offset), @intCast(buf.len));
+    ic0.stable64_read(@intCast(@intFromPtr(buf.ptr)), @intCast(offset), @intCast(buf.len));
 }
 
 pub const Writer = struct {

@@ -1,0 +1,8 @@
+compute;parse_input 1197
+compute;process;validate 1293
+compute;process;transform;encode 278
+compute;process;transform 1260
+compute;process;persist 2546
+compute;process 3234
+compute;commit 278
+compute 4239

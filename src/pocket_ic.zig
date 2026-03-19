@@ -1,5 +1,6 @@
 const std = @import("std");
 pub const principal = @import("principal.zig");
+pub const flamegraph = @import("flamegraph.zig");
 
 const Allocator = std.mem.Allocator;
 const ManagedList = std.array_list.AlignedManaged(u8, null);

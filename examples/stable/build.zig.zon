@@ -1,0 +1,13 @@
+.{
+    .name = .stable,
+    .version = "0.0.0",
+    .fingerprint = 0xc7fa697e57f1019,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "stable.zig",
+    },
+}

@@ -67,8 +67,8 @@ pub extern "ic0" fn stable_read(dst: [*]const u8, offset: i32, size: i32) void;
 // Stable memory (64-bit)
 pub extern "ic0" fn stable64_size() i64;
 pub extern "ic0" fn stable64_grow(new_pages: i64) i64;
-pub extern "ic0" fn stable64_write(offset: i64, src: [*]const u8, size: i64) void;
-pub extern "ic0" fn stable64_read(dst: [*]const u8, offset: i64, size: i64) void;
+pub extern "ic0" fn stable64_write(offset: i64, src: i64, size: i64) void;
+pub extern "ic0" fn stable64_read(dst: i64, offset: i64, size: i64) void;
 
 // Certified data
 pub extern "ic0" fn certified_data_set(src: [*]const u8, len: i32) void;
