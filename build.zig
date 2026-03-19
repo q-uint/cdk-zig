@@ -1,5 +1,55 @@
 const std = @import("std");
 
+pub fn addCanister(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    name: []const u8,
+) *std.Build.Step.Compile {
+    const cdk_mod = dep.module("cdk");
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const root_mod = b.createModule(.{
+        .root_source_file = b.path(b.fmt("{s}.zig", .{name})),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "cdk", .module = cdk_mod }},
+    });
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = root_mod,
+    });
+    exe.entry = .disabled;
+    exe.rdynamic = true;
+
+    const install = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install.step);
+
+    return exe;
+}
+
+pub fn addTests(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+) *std.Build.Step.Run {
+    const pic_mod = dep.module("pocket-ic");
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("test.zig"),
+        .target = b.standardTargetOptions(.{}),
+        .optimize = b.standardOptimizeOption(.{}),
+        .imports = &.{
+            .{ .name = "pocket-ic", .module = pic_mod },
+        },
+    });
+    const t = b.addTest(.{ .root_module = test_mod });
+    t.step.dependOn(b.getInstallStep());
+    const run = b.addRunArtifact(t);
+    const test_step = b.step("test", "Run e2e tests");
+    test_step.dependOn(&run.step);
+    return run;
+}
+
 pub fn build(b: *std.Build) void {
     _ = b.addModule("cdk", .{
         .root_source_file = b.path("src/cdk.zig"),
