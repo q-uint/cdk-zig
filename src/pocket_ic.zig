@@ -40,7 +40,7 @@ pub const PocketIc = struct {
     url: []const u8,
     instance_id: usize,
     effective_canister_id: []const u8,
-    client: std.http.Client,
+    client: *std.http.Client,
     process: ?std.process.Child = null,
 
     pub fn init(allocator: Allocator, config: PocketIcConfig) !PocketIc {
@@ -53,7 +53,8 @@ pub const PocketIc = struct {
             break :blk result.url;
         };
 
-        var client: std.http.Client = .{ .allocator = allocator };
+        const client = try allocator.create(std.http.Client);
+        client.* = .{ .allocator = allocator };
 
         const instance_json = try buildInstanceConfigJson(allocator, config);
         defer allocator.free(instance_json);
@@ -61,7 +62,7 @@ pub const PocketIc = struct {
         const create_url = try std.fmt.allocPrint(allocator, "{s}/instances", .{url});
         defer allocator.free(create_url);
 
-        const resp = try httpPost(&client, allocator, create_url, instance_json);
+        const resp = try httpPost(client, allocator, create_url, instance_json);
         defer allocator.free(resp.body);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp.body, .{
@@ -100,11 +101,13 @@ pub const PocketIc = struct {
         defer if (delete_url.len > 0) self.allocator.free(delete_url);
 
         if (delete_url.len > 0) {
-            if (httpDelete(&self.client, self.allocator, delete_url)) |resp| {
+            if (httpDelete(self.client, self.allocator, delete_url)) |resp| {
                 self.allocator.free(resp.body);
             } else |_| {}
         }
 
+        self.client.deinit();
+        self.allocator.destroy(self.client);
         self.allocator.free(self.effective_canister_id);
         self.allocator.free(self.url);
 
@@ -239,7 +242,7 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(url);
 
-        const resp = try httpGet(&self.client, self.allocator, url);
+        const resp = try httpGet(self.client, self.allocator, url);
         defer self.allocator.free(resp.body);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, resp.body, .{
@@ -340,7 +343,7 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(url);
 
-        const resp = try httpPost(&self.client, self.allocator, url, "{}");
+        const resp = try httpPost(self.client, self.allocator, url, "{}");
         self.allocator.free(resp.body);
     }
 
@@ -352,7 +355,7 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(url);
 
-        const resp = try httpPost(&self.client, self.allocator, url, "\"\"");
+        const resp = try httpPost(self.client, self.allocator, url, "\"\"");
         self.allocator.free(resp.body);
     }
 
@@ -426,7 +429,7 @@ pub const PocketIc = struct {
         url: []const u8,
         body: ?[]const u8,
     ) !HttpResponse {
-        var resp = try httpRequest(&self.client, self.allocator, method, url, body);
+        var resp = try httpRequest(self.client, self.allocator, method, url, body);
 
         if (resp.status != .accepted) return resp;
 
@@ -449,7 +452,7 @@ pub const PocketIc = struct {
 
         for (0..3000) |_| {
             std.Thread.sleep(10 * std.time.ns_per_ms);
-            resp = try httpGet(&self.client, self.allocator, poll_url);
+            resp = try httpGet(self.client, self.allocator, poll_url);
             if (resp.status == .ok) break;
             self.allocator.free(resp.body);
         } else {
@@ -463,7 +466,7 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(prune_url);
 
-        const prune_resp = httpDelete(&self.client, self.allocator, prune_url) catch |err| {
+        const prune_resp = httpDelete(self.client, self.allocator, prune_url) catch |err| {
             std.log.warn("failed to prune graph: {}", .{err});
             return resp;
         };
@@ -1213,35 +1216,37 @@ fn skipIfNoServer() !void {
 
 test "server: instance lifecycle" {
     try skipIfNoServer();
-    var pocket = try PocketIc.init(std.heap.page_allocator, .{});
+    var pocket = try PocketIc.init(testing.allocator, .{});
     pocket.deinit();
 }
 
 test "server: create canister" {
     try skipIfNoServer();
-    var pocket = try PocketIc.init(std.heap.page_allocator, .{});
+    var pocket = try PocketIc.init(testing.allocator, .{});
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
+    defer testing.allocator.free(cid);
     try testing.expect(cid.len > 0);
 }
 
 test "server: install code and query" {
     try skipIfNoServer();
-    var pocket = try PocketIc.init(std.heap.page_allocator, .{});
+    var pocket = try PocketIc.init(testing.allocator, .{});
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
+    defer testing.allocator.free(cid);
     try pocket.installCode(cid, &test_canister_wasm, "", .install);
 
     const result = try pocket.queryCall(cid, principal.anonymous, "greet", "");
     switch (result) {
         .reply => |data| {
-            defer std.heap.page_allocator.free(data);
+            defer testing.allocator.free(data);
             try testing.expectEqualStrings("hello", data);
         },
         .reject => |msg| {
-            defer std.heap.page_allocator.free(msg);
+            defer testing.allocator.free(msg);
             std.debug.print("rejected: {s}\n", .{msg});
             return error.Rejected;
         },
@@ -1250,7 +1255,7 @@ test "server: install code and query" {
 
 test "server: time control" {
     try skipIfNoServer();
-    var pocket = try PocketIc.init(std.heap.page_allocator, .{});
+    var pocket = try PocketIc.init(testing.allocator, .{});
     defer pocket.deinit();
 
     const t1 = try pocket.getTime();
@@ -1270,7 +1275,7 @@ test "server: time control" {
 
 test "server: tick" {
     try skipIfNoServer();
-    var pocket = try PocketIc.init(std.heap.page_allocator, .{});
+    var pocket = try PocketIc.init(testing.allocator, .{});
     defer pocket.deinit();
 
     try pocket.tick();
@@ -1278,10 +1283,11 @@ test "server: tick" {
 
 test "server: add and get cycles" {
     try skipIfNoServer();
-    var pocket = try PocketIc.init(std.heap.page_allocator, .{});
+    var pocket = try PocketIc.init(testing.allocator, .{});
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
+    defer testing.allocator.free(cid);
     const added = try pocket.addCycles(cid, 1_000_000_000_000);
     try testing.expect(added > 0);
 
@@ -1291,11 +1297,12 @@ test "server: add and get cycles" {
 
 test "server: multiple subnets" {
     try skipIfNoServer();
-    var pocket = try PocketIc.init(std.heap.page_allocator, .{
+    var pocket = try PocketIc.init(testing.allocator, .{
         .application_subnets = 2,
     });
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
+    defer testing.allocator.free(cid);
     try testing.expect(cid.len > 0);
 }

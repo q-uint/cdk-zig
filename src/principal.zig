@@ -1,31 +1,33 @@
 const std = @import("std");
 const base32 = @import("base32.zig");
 
+const allocator = @import("allocator.zig").default;
+
 pub const Principal = []const u8;
 
 pub const managementCanister: Principal = &.{};
 pub const anonymous: Principal = &.{0x04};
 
 pub fn encode(principal: Principal) []const u8 {
-    const src = std.heap.page_allocator.alloc(u8, 4 + principal.len) catch
+    const src = allocator.alloc(u8, 4 + principal.len) catch
         @panic("failed to allocate memory");
     const crc = std.hash.crc.Crc32IsoHdlc.hash(principal);
     std.mem.writeInt(u32, src[0..4], crc, .big);
     @memcpy(src[4..], principal);
 
-    const dst = std.heap.page_allocator.alloc(u8, base32.encode_len(src.len)) catch
+    const dst = allocator.alloc(u8, base32.encode_len(src.len)) catch
         @panic("failed to allocate memory");
     base32.std_encoding.encode(dst, src);
-    std.heap.page_allocator.free(src);
+    allocator.free(src);
 
     for (dst) |*c| {
         c.* = std.ascii.toLower(c.*);
     }
 
-    const out = std.heap.page_allocator.alloc(u8, dst.len + (dst.len - 1) / 5) catch
+    const out = allocator.alloc(u8, dst.len + (dst.len - 1) / 5) catch
         @panic("failed to allocate memory");
     insertDashes(out, dst);
-    std.heap.page_allocator.free(dst);
+    allocator.free(dst);
     return out;
 }
 
@@ -38,7 +40,7 @@ pub fn decode(text: []const u8) DecodeError!Principal {
     }
     const decoded_total = slen * 5 / 8;
     if (decoded_total < 4) return error.TooShort;
-    const buf = std.heap.page_allocator.alloc(u8, decoded_total) catch
+    const buf = allocator.alloc(u8, decoded_total) catch
         @panic("failed to allocate memory");
     const n = try base32.decode(buf, text);
     if (n < 4) return error.TooShort;

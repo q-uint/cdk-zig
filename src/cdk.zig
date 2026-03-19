@@ -6,7 +6,7 @@ pub const call = @import("call.zig");
 pub const stable = @import("stable.zig");
 const exp = @import("export.zig");
 
-pub const allocator = std.heap.page_allocator;
+pub const allocator = @import("allocator.zig").default;
 
 // Export decorators
 pub const init = exp.init;

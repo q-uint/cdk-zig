@@ -1,7 +1,7 @@
 const std = @import("std");
 const ic0 = @import("ic0.zig");
 
-const allocator = std.heap.page_allocator;
+const allocator = @import("allocator.zig").default;
 
 pub const CallError = error{
     CallPerformFailed,

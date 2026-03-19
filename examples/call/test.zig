@@ -1,7 +1,7 @@
 const std = @import("std");
 const pic = @import("pocket-ic");
 
-const allocator = std.heap.page_allocator;
+const allocator = std.testing.allocator;
 
 fn readWasm(name: []const u8) ![]const u8 {
     return std.fs.cwd().readFileAlloc(allocator, name, 10 * 1024 * 1024);
@@ -31,6 +31,7 @@ test "create canister" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
+    defer allocator.free(cid);
     try std.testing.expect(cid.len > 0);
 }
 
@@ -67,6 +68,7 @@ test "callee greet" {
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();
+    defer allocator.free(callee_id);
     try pocket.installCode(callee_id, callee_wasm, "", .install);
 
     const result = try pocket.queryCall(callee_id, pic.principal.anonymous, "greet", "");
@@ -81,6 +83,7 @@ test "caller greet" {
     defer pocket.deinit();
 
     const caller_id = try pocket.createCanister();
+    defer allocator.free(caller_id);
     try pocket.installCode(caller_id, caller_wasm, "", .install);
 
     const result = try pocket.queryCall(caller_id, pic.principal.anonymous, "greet", "");
@@ -97,10 +100,13 @@ test "caller calls callee" {
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();
+    defer allocator.free(callee_id);
     try pocket.installCode(callee_id, callee_wasm, "", .install);
 
     const callee_text = pic.principal.encode(callee_id);
+    defer allocator.free(callee_text);
     const caller_id = try pocket.createCanister();
+    defer allocator.free(caller_id);
     try pocket.installCode(caller_id, caller_wasm, callee_text, .install);
 
     const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_greet", "");

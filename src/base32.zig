@@ -132,8 +132,9 @@ test "std_encoding" {
     };
     for (pairs) |tp| {
         const encoded_len = encode_len(tp.decoded.len);
-        const encoded = std.heap.page_allocator.alloc(u8, @intCast(encoded_len)) catch @panic("");
-        defer std.heap.page_allocator.free(encoded);
+        const a = @import("allocator.zig").default;
+        const encoded = a.alloc(u8, @intCast(encoded_len)) catch @panic("");
+        defer a.free(encoded);
         std_encoding.encode(encoded, tp.decoded);
         try std.testing.expectEqualSlices(u8, encoded, tp.encoded);
     }
