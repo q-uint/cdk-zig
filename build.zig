@@ -1,17 +1,23 @@
 const std = @import("std");
 
+pub const CanisterOptions = struct {
+    wasm64: bool = false,
+    root_source_file: ?[]const u8 = null,
+};
+
 pub fn addCanister(
     b: *std.Build,
     dep: *std.Build.Dependency,
     name: []const u8,
+    options: CanisterOptions,
 ) *std.Build.Step.Compile {
     const cdk_mod = dep.module("cdk");
     const target = b.resolveTargetQuery(.{
-        .cpu_arch = .wasm32,
+        .cpu_arch = if (options.wasm64) .wasm64 else .wasm32,
         .os_tag = .freestanding,
     });
     const root_mod = b.createModule(.{
-        .root_source_file = b.path(b.fmt("{s}.zig", .{name})),
+        .root_source_file = b.path(options.root_source_file orelse b.fmt("{s}.zig", .{name})),
         .target = target,
         .optimize = .ReleaseSmall,
         .imports = &.{.{ .name = "cdk", .module = cdk_mod }},
@@ -79,6 +85,25 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
+
+    // Compile-check the CDK for both wasm32 and wasm64 targets.
+    const wasm_check_step = b.step("wasm-check", "Verify CDK compiles for wasm32 and wasm64");
+    for ([_]std.Target.Cpu.Arch{ .wasm32, .wasm64 }) |arch| {
+        const wasm_exe = b.addExecutable(.{
+            .name = "cdk-check",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/cdk.zig"),
+                .target = b.resolveTargetQuery(.{
+                    .cpu_arch = arch,
+                    .os_tag = .freestanding,
+                }),
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        wasm_exe.entry = .disabled;
+        wasm_check_step.dependOn(&wasm_exe.step);
+    }
+    test_step.dependOn(wasm_check_step);
 
     const e2e_step = b.step("e2e", "Run e2e tests for all examples");
     var examples_dir = std.fs.openDirAbsolute(

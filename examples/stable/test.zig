@@ -7,6 +7,10 @@ fn readWasm() ![]const u8 {
     return std.fs.cwd().readFileAlloc(allocator, "zig-out/bin/stable.wasm", 10 * 1024 * 1024);
 }
 
+fn readWasm64() ![]const u8 {
+    return std.fs.cwd().readFileAlloc(allocator, "zig-out/bin/stable64.wasm", 10 * 1024 * 1024);
+}
+
 fn expectReply(
     pocket: *pic.PocketIc,
     cid: []const u8,
@@ -196,4 +200,37 @@ test "counter persists across upgrade" {
     const after = try expectReply(&pocket, cid, "get_counter", "", .query);
     defer allocator.free(after);
     try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, after[0..4], .little));
+}
+
+test "wasm64: write and read round-trip" {
+    const wasm = try readWasm64();
+    defer allocator.free(wasm);
+
+    var pocket = try pic.PocketIc.init(allocator, .{});
+    defer pocket.deinit();
+
+    const cid = try pocket.createCanister();
+    defer allocator.free(cid);
+    try pocket.installCode(cid, wasm, "", .install);
+
+    // Grow 1 page.
+    const grow_reply = try expectReply(&pocket, cid, "grow", &std.mem.toBytes(@as(u64, 1)), .update);
+    allocator.free(grow_reply);
+
+    // Write "hello wasm64" at offset 100.
+    const payload = "hello wasm64";
+    var write_arg: [8 + payload.len]u8 = undefined;
+    @memcpy(write_arg[0..8], &std.mem.toBytes(@as(u64, 100)));
+    @memcpy(write_arg[8..], payload);
+    const write_reply = try expectReply(&pocket, cid, "write", &write_arg, .update);
+    allocator.free(write_reply);
+
+    // Read back from offset 100.
+    var read_arg: [16]u8 = undefined;
+    @memcpy(read_arg[0..8], &std.mem.toBytes(@as(u64, 100)));
+    @memcpy(read_arg[8..16], &std.mem.toBytes(@as(u64, payload.len)));
+    const read_reply = try expectReply(&pocket, cid, "read", &read_arg, .query);
+    defer allocator.free(read_reply);
+
+    try std.testing.expectEqualStrings(payload, read_reply);
 }

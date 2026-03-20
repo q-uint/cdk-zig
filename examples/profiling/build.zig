@@ -3,7 +3,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const dep = b.dependency("cdk", .{});
-    _ = cdk.addCanister(b, dep, "profiling");
+    _ = cdk.addCanister(b, dep, "profiling", .{});
     const run_tests = cdk.addTests(b, dep);
 
     // Generate flamegraph SVGs from folded stacks produced by tests.

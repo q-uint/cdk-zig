@@ -1,6 +1,7 @@
 # Zig CDK
 
-A Zig canister development kit for the [Internet Computer](https://internetcomputer.org/).
+A Zig canister development kit for the [Internet Computer](https://internetcomputer.org/),
+supporting both wasm32 and wasm64 targets.
 
 ## Quick start
 
@@ -18,7 +19,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const dep = b.dependency("cdk", .{});
-    _ = cdk.addCanister(b, dep, "my_canister");
+    _ = cdk.addCanister(b, dep, "my_canister", .{});
     _ = cdk.addTests(b, dep);
 }
 ```
@@ -138,7 +139,8 @@ fn restore() void {
 ```
 
 The `cdk.stable` module also provides streaming `Writer` and `Reader` types
-that handle page allocation automatically.
+that handle page allocation automatically. Stable memory works identically
+on both wasm32 and wasm64 targets.
 
 ### Async executor
 
@@ -189,10 +191,12 @@ See [examples/profiling/](examples/profiling/) for details.
 
 The CDK provides two build-system functions importable via `@import("cdk")`:
 
-- **`addCanister(b, dep, name)`** -- builds a
-  `wasm32-freestanding` canister from `{name}.zig`, with `ReleaseSmall`
-  optimization, entry disabled, and rdynamic enabled. Returns the
-  `*Compile` step for further customization.
+- **`addCanister(b, dep, name, options)`** -- builds a
+  canister from `{name}.zig`, with `ReleaseSmall`
+  optimization, entry disabled, and rdynamic enabled. Targets
+  `wasm32-freestanding` by default; pass `.{ .wasm64 = true }` for
+  `wasm64-freestanding`. Returns the `*Compile` step for further
+  customization.
 
 - **`addTests(b, dep)`** -- sets up an e2e test step that compiles
   `test.zig` with the `pocket-ic` module and depends on the install step.

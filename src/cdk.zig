@@ -74,7 +74,7 @@ pub fn caller() principal.Principal {
 }
 
 pub fn argData() []const u8 {
-    const size: u32 = @intCast(ic0.msg_arg_data_size());
+    const size: usize = @intCast(ic0.msg_arg_data_size());
     if (size == 0) return &.{};
     const buf = allocator.alloc(u8, size) catch
         @panic("failed to allocate memory");
@@ -87,7 +87,7 @@ pub fn msgRejectCode() RejectCode {
 }
 
 pub fn msgRejectMsg() []const u8 {
-    const len: u32 = @intCast(ic0.msg_reject_msg_size());
+    const len: usize = @intCast(ic0.msg_reject_msg_size());
     if (len == 0) return &.{};
     const buf = allocator.alloc(u8, len) catch
         @panic("failed to allocate memory");
@@ -100,7 +100,7 @@ pub fn msgDeadline() u64 {
 }
 
 pub fn msgMethodName() []const u8 {
-    const len: u32 = @intCast(ic0.msg_method_name_size());
+    const len: usize = @intCast(ic0.msg_method_name_size());
     if (len == 0) return &.{};
     const buf = allocator.alloc(u8, len) catch
         @panic("failed to allocate memory");
@@ -230,7 +230,7 @@ pub fn certifiedDataSet(data: []const u8) void {
 
 pub fn dataCertificate() ?[]const u8 {
     if (ic0.data_certificate_present() == 0) return null;
-    const len: u32 = @intCast(ic0.data_certificate_size());
+    const len: usize = @intCast(ic0.data_certificate_size());
     const buf = allocator.alloc(u8, len) catch
         @panic("failed to allocate memory");
     ic0.data_certificate_copy(buf.ptr, 0, @intCast(len));
@@ -238,7 +238,7 @@ pub fn dataCertificate() ?[]const u8 {
 }
 
 pub fn rootKey() []const u8 {
-    const len: u32 = @intCast(ic0.root_key_size());
+    const len: usize = @intCast(ic0.root_key_size());
     const buf = allocator.alloc(u8, len) catch
         @panic("failed to allocate memory");
     ic0.root_key_copy(buf.ptr, 0, @intCast(len));
@@ -309,12 +309,12 @@ fn signCostResult(dst: *const [16]u8, code: u32) SignCostError!u128 {
 }
 
 // Environment variables
-pub fn envVarCount() u32 {
+pub fn envVarCount() usize {
     return @intCast(ic0.env_var_count());
 }
 
-pub fn envVarName(index: u32) []const u8 {
-    const len: u32 = @intCast(ic0.env_var_name_size(@intCast(index)));
+pub fn envVarName(index: usize) []const u8 {
+    const len: usize = @intCast(ic0.env_var_name_size(@intCast(index)));
     if (len == 0) return &.{};
     const buf = allocator.alloc(u8, len) catch
         @panic("failed to allocate memory");
@@ -327,7 +327,7 @@ pub fn envVarNameExists(name: []const u8) bool {
 }
 
 pub fn envVarValue(name: []const u8) []const u8 {
-    const len: u32 = @intCast(ic0.env_var_value_size(name.ptr, @intCast(name.len)));
+    const len: usize = @intCast(ic0.env_var_value_size(name.ptr, @intCast(name.len)));
     if (len == 0) return &.{};
     const buf = allocator.alloc(u8, len) catch
         @panic("failed to allocate memory");

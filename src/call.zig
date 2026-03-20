@@ -175,10 +175,10 @@ pub fn TypedCallFuture(comptime Codec: type, comptime Return: type) type {
             return self.state.result;
         }
 
-        fn replyCallback(env: i32) callconv(.c) void {
-            const state: *State = @ptrFromInt(@as(u32, @intCast(env)));
+        fn replyCallback(env: ic0.I) callconv(.c) void {
+            const state: *State = @ptrFromInt(@as(usize, @intCast(env)));
 
-            const size: u32 = @intCast(ic0.msg_arg_data_size());
+            const size: usize = @intCast(ic0.msg_arg_data_size());
             const data = allocator.alloc(u8, size) catch
                 @panic("failed to allocate reply data");
             ic0.msg_arg_data_copy(data.ptr, 0, @intCast(size));
@@ -188,11 +188,11 @@ pub fn TypedCallFuture(comptime Codec: type, comptime Return: type) type {
             invokeHandler(state);
         }
 
-        fn rejectCallback(env: i32) callconv(.c) void {
-            const state: *State = @ptrFromInt(@as(u32, @intCast(env)));
+        fn rejectCallback(env: ic0.I) callconv(.c) void {
+            const state: *State = @ptrFromInt(@as(usize, @intCast(env)));
 
             const code = ic0.msg_reject_code();
-            const msg_size: u32 = @intCast(ic0.msg_reject_msg_size());
+            const msg_size: usize = @intCast(ic0.msg_reject_msg_size());
             const msg = allocator.alloc(u8, msg_size) catch
                 @panic("failed to allocate reject message");
             ic0.msg_reject_msg_copy(msg.ptr, 0, @intCast(msg_size));
@@ -256,7 +256,7 @@ pub fn callOnewayWithOptions(
     }
 }
 
-// Convert a Zig function pointer to a Wasm table index (i32).
-fn funcIdx(f: anytype) i32 {
+// Convert a Zig function pointer to a Wasm table index.
+fn funcIdx(f: anytype) ic0.I {
     return @intCast(@intFromPtr(&f));
 }
