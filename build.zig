@@ -67,6 +67,7 @@ pub fn build(b: *std.Build) void {
         "src/base32.zig",
         "src/principal.zig",
         "src/pocket_ic.zig",
+        "src/stable/stable.zig",
     };
     for (test_files) |file| {
         const t = b.addTest(.{

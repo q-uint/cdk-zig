@@ -3,7 +3,7 @@ const std = @import("std");
 pub const principal = @import("principal.zig");
 pub const ic0 = @import("ic0.zig");
 pub const call = @import("call.zig");
-pub const stable = @import("stable.zig");
+pub const stable = @import("stable/stable.zig");
 const exp = @import("export.zig");
 
 pub const timers = @import("timers.zig");

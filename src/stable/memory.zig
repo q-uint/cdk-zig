@@ -1,7 +1,11 @@
 const std = @import("std");
-const ic0 = @import("ic0.zig");
 
-pub const wasm_page_size: u64 = 64 * 1024; // 64 KiB
+extern "ic0" fn stable64_size() i64;
+extern "ic0" fn stable64_grow(new_pages: i64) i64;
+extern "ic0" fn stable64_write(offset: i64, src: i64, size_: i64) void;
+extern "ic0" fn stable64_read(dst: i64, offset: i64, size_: i64) void;
+
+pub const wasm_page_size: u64 = 64 * 1024;
 
 pub const StableMemoryError = error{
     OutOfMemory,
@@ -9,21 +13,21 @@ pub const StableMemoryError = error{
 };
 
 pub fn size() u64 {
-    return @intCast(ic0.stable64_size());
+    return @intCast(stable64_size());
 }
 
 pub fn grow(new_pages: u64) StableMemoryError!u64 {
-    const result: u64 = @intCast(ic0.stable64_grow(@intCast(new_pages)));
+    const result: u64 = @intCast(stable64_grow(@intCast(new_pages)));
     if (result == std.math.maxInt(u64)) return StableMemoryError.OutOfMemory;
     return result;
 }
 
 pub fn write(offset: u64, buf: []const u8) void {
-    ic0.stable64_write(@intCast(offset), @intCast(@intFromPtr(buf.ptr)), @intCast(buf.len));
+    stable64_write(@intCast(offset), @intCast(@intFromPtr(buf.ptr)), @intCast(buf.len));
 }
 
 pub fn read(offset: u64, buf: []u8) void {
-    ic0.stable64_read(@intCast(@intFromPtr(buf.ptr)), @intCast(offset), @intCast(buf.len));
+    stable64_read(@intCast(@intFromPtr(buf.ptr)), @intCast(offset), @intCast(buf.len));
 }
 
 pub const Writer = struct {
