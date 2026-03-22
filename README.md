@@ -207,6 +207,7 @@ The CDK provides two build-system functions importable via `@import("cdk")`:
 | Example | Description |
 |---------|-------------|
 | [call](examples/call/) | Inter-canister calls with callback-based futures |
+| [candid](examples/candid/) | Candid-encoded arguments and replies |
 | [executor](examples/executor/) | Async task executor with poll-based state machines |
 | [timers](examples/timers/) | One-shot and repeating timer scheduling |
 | [stable](examples/stable/) | Stable memory persistence across upgrades |

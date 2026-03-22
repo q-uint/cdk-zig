@@ -1,0 +1,14 @@
+.{
+    .name = .candid,
+    .version = "0.0.0",
+    .fingerprint = 0xf13714c9d58ce4db,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "caller.zig",
+        "callee.zig",
+    },
+}

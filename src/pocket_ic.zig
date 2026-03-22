@@ -1,9 +1,10 @@
 const std = @import("std");
-pub const principal = @import("principal.zig");
+const cdk = @import("cdk");
+pub const principal = cdk.principal;
 pub const flamegraph = @import("flamegraph.zig");
+const candid = cdk.candid;
 
 const Allocator = std.mem.Allocator;
-const ManagedList = std.array_list.AlignedManaged(u8, null);
 const Stringify = std.json.Stringify;
 const IoWriter = std.io.Writer;
 
@@ -123,7 +124,10 @@ pub const PocketIc = struct {
     }
 
     pub fn createCanisterWithSender(self: *PocketIc, sender: []const u8) ![]const u8 {
-        const payload = &candid.empty_record_args;
+        const EmptyRecord = struct {};
+        const payload = candid.encode(self.allocator, .{EmptyRecord{}}) catch
+            return error.CandidEncodingFailed;
+        defer self.allocator.free(payload);
         const reply = try self.managementCallWithEffective(
             sender,
             "provisional_create_canister_with_cycles",
@@ -132,7 +136,10 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(reply);
 
-        return try candid.decodePrincipalFromRecord(self.allocator, reply);
+        const CreateResult = struct { canister_id: candid.Principal };
+        const result = candid.decode(CreateResult, self.allocator, reply) catch
+            return error.CandidDecodingFailed;
+        return result.canister_id.bytes;
     }
 
     pub fn installCode(
@@ -153,13 +160,24 @@ pub const PocketIc = struct {
         mode: InstallMode,
         sender: []const u8,
     ) !void {
-        const payload = try candid.encodeInstallCodeArgs(
-            self.allocator,
-            mode,
-            canister_id,
-            wasm_module,
-            arg,
-        );
+        const InstallCodeMode = union(enum) { install: void, reinstall: void, upgrade: void };
+        const InstallCodeArgs = struct {
+            arg: candid.Blob,
+            canister_id: candid.Principal,
+            mode: InstallCodeMode,
+            wasm_module: candid.Blob,
+        };
+        const mode_val: InstallCodeMode = switch (mode) {
+            .install => .{ .install = {} },
+            .reinstall => .{ .reinstall = {} },
+            .upgrade => .{ .upgrade = {} },
+        };
+        const payload = candid.encode(self.allocator, .{InstallCodeArgs{
+            .arg = candid.Blob.from(arg),
+            .canister_id = candid.Principal.from(canister_id),
+            .mode = mode_val,
+            .wasm_module = candid.Blob.from(wasm_module),
+        }}) catch return error.CandidEncodingFailed;
         defer self.allocator.free(payload);
 
         const reply = try self.managementCallWithEffective(sender, "install_code", payload, .{ .canister_id = canister_id });
@@ -722,212 +740,6 @@ fn base64Decode(allocator: Allocator, encoded: []const u8) ![]const u8 {
     return buf;
 }
 
-const candid = struct {
-    // Candid encoding of (record {}) -- used for create_canister args
-    // DIDL + 1 type (record, 0 fields) + 1 arg of type 0
-    const empty_record_args = [_]u8{
-        'D', 'I', 'D', 'L', // magic
-        0x01, // 1 type in table
-        0x6c, 0x00, // type 0: record with 0 fields
-        0x01, // 1 argument
-        0x00, // arg 0 is type 0
-    };
-
-    fn fieldHash(comptime name: []const u8) u32 {
-        var h: u32 = 0;
-        for (name) |c| {
-            h = h *% 223 +% c;
-        }
-        return h;
-    }
-
-    const FieldInfo = struct {
-        hash: u32,
-        name: []const u8,
-    };
-
-    fn sortFields(comptime fields: []const FieldInfo) [fields.len]FieldInfo {
-        var sorted: [fields.len]FieldInfo = undefined;
-        @memcpy(&sorted, fields);
-        for (0..sorted.len) |i| {
-            for (i + 1..sorted.len) |j| {
-                if (sorted[j].hash < sorted[i].hash) {
-                    const tmp = sorted[i];
-                    sorted[i] = sorted[j];
-                    sorted[j] = tmp;
-                }
-            }
-        }
-        return sorted;
-    }
-
-    const install_code_fields = sortFields(&[_]FieldInfo{
-        .{ .hash = fieldHash("arg"), .name = "arg" },
-        .{ .hash = fieldHash("canister_id"), .name = "canister_id" },
-        .{ .hash = fieldHash("mode"), .name = "mode" },
-        .{ .hash = fieldHash("wasm_module"), .name = "wasm_module" },
-    });
-
-    const mode_variants = sortFields(&[_]FieldInfo{
-        .{ .hash = fieldHash("install"), .name = "install" },
-        .{ .hash = fieldHash("reinstall"), .name = "reinstall" },
-        .{ .hash = fieldHash("upgrade"), .name = "upgrade" },
-    });
-
-    fn modeIndex(comptime mode_name: []const u8) u32 {
-        for (mode_variants, 0..) |v, i| {
-            if (std.mem.eql(u8, v.name, mode_name)) return @intCast(i);
-        }
-        unreachable;
-    }
-
-    fn encodeInstallCodeArgs(
-        allocator: Allocator,
-        mode: InstallMode,
-        canister_id_bytes: []const u8,
-        wasm_module: []const u8,
-        arg: []const u8,
-    ) ![]const u8 {
-        var buf = ManagedList.init(allocator);
-
-        // Magic
-        try buf.appendSlice("DIDL");
-
-        // Type table: 3 types
-        // type 0: vec nat8 (blob)
-        // type 1: variant { install: null, reinstall: null, upgrade: null }
-        // type 2: record { arg: type0, canister_id: principal, mode: type1, wasm_module: type0 }
-        try appendUleb128(&buf, 3);
-
-        // type 0: vec (0x6d) nat8 (0x7b)
-        try appendSleb128(&buf, -19); // vec
-        try appendSleb128(&buf, -5); // nat8
-
-        // type 1: variant with 3 options
-        try appendSleb128(&buf, -21); // variant
-        try appendUleb128(&buf, 3); // 3 options
-        for (mode_variants) |v| {
-            try appendUleb128(&buf, v.hash);
-            try appendSleb128(&buf, -1); // null
-        }
-
-        // type 2: record with 4 fields
-        try appendSleb128(&buf, -20); // record
-        try appendUleb128(&buf, 4); // 4 fields
-        for (install_code_fields) |f| {
-            try appendUleb128(&buf, f.hash);
-            if (std.mem.eql(u8, f.name, "arg") or std.mem.eql(u8, f.name, "wasm_module")) {
-                try appendSleb128(&buf, 0); // type 0 (blob)
-            } else if (std.mem.eql(u8, f.name, "canister_id")) {
-                try appendSleb128(&buf, -24); // principal
-            } else if (std.mem.eql(u8, f.name, "mode")) {
-                try appendSleb128(&buf, 1); // type 1 (variant)
-            }
-        }
-
-        // Args section: 1 arg of type 2
-        try appendUleb128(&buf, 1);
-        try appendSleb128(&buf, 2);
-
-        // Values - record fields in sorted hash order
-        for (install_code_fields) |f| {
-            if (std.mem.eql(u8, f.name, "arg")) {
-                try appendUleb128(&buf, arg.len);
-                try buf.appendSlice(arg);
-            } else if (std.mem.eql(u8, f.name, "canister_id")) {
-                try buf.append(0x01); // present
-                try appendUleb128(&buf, canister_id_bytes.len);
-                try buf.appendSlice(canister_id_bytes);
-            } else if (std.mem.eql(u8, f.name, "mode")) {
-                const idx: u32 = switch (mode) {
-                    .install => modeIndex("install"),
-                    .reinstall => modeIndex("reinstall"),
-                    .upgrade => modeIndex("upgrade"),
-                };
-                try appendUleb128(&buf, idx);
-                // null value = no bytes
-            } else if (std.mem.eql(u8, f.name, "wasm_module")) {
-                try appendUleb128(&buf, wasm_module.len);
-                try buf.appendSlice(wasm_module);
-            }
-        }
-
-        return buf.toOwnedSlice();
-    }
-
-    fn decodePrincipalFromRecord(allocator: Allocator, data: []const u8) ![]const u8 {
-        if (data.len < 4) return error.CandidDecodingFailed;
-        if (!std.mem.eql(u8, data[0..4], "DIDL")) return error.CandidDecodingFailed;
-
-        var pos: usize = 4;
-
-        // Skip type table
-        const type_count = readUleb128(data, &pos);
-        for (0..type_count) |_| {
-            const tag = readSleb128(data, &pos);
-            switch (tag) {
-                -18 => { // opt
-                    _ = readSleb128(data, &pos);
-                },
-                -19 => { // vec
-                    _ = readSleb128(data, &pos);
-                },
-                -20, -21 => { // record, variant
-                    const n = readUleb128(data, &pos);
-                    for (0..n) |_| {
-                        _ = readUleb128(data, &pos); // hash
-                        _ = readSleb128(data, &pos); // type
-                    }
-                },
-                else => {},
-            }
-        }
-
-        // Skip arg count and type refs
-        const arg_count = readUleb128(data, &pos);
-        for (0..arg_count) |_| {
-            _ = readSleb128(data, &pos);
-        }
-
-        // Now at value section. Expect a record with a principal field.
-        // The principal is encoded as: 0x01 (present) + uleb128(len) + bytes
-        if (pos >= data.len) return error.CandidDecodingFailed;
-
-        // Look for the principal value (0x01 flag byte followed by length)
-        if (data[pos] != 0x01) return error.CandidDecodingFailed;
-        pos += 1;
-
-        const len = readUleb128(data, &pos);
-        if (pos + len > data.len) return error.CandidDecodingFailed;
-
-        return try allocator.dupe(u8, data[pos .. pos + len]);
-    }
-};
-
-const leb128 = std.leb;
-
-fn appendUleb128(list: *ManagedList, value: anytype) !void {
-    try leb128.writeUleb128(list.writer(), value);
-}
-
-fn appendSleb128(list: *ManagedList, value: anytype) !void {
-    try leb128.writeIleb128(list.writer(), value);
-}
-
-fn readUleb128(data: []const u8, pos: *usize) usize {
-    var fbs = std.io.fixedBufferStream(data[pos.*..]);
-    const value = leb128.readUleb128(usize, fbs.reader()) catch return 0;
-    pos.* += fbs.pos;
-    return value;
-}
-
-fn readSleb128(data: []const u8, pos: *usize) i64 {
-    var fbs = std.io.fixedBufferStream(data[pos.*..]);
-    const value = leb128.readIleb128(i64, fbs.reader()) catch return 0;
-    pos.* += fbs.pos;
-    return value;
-}
-
 const testing = std.testing;
 
 test "base64 round-trip" {
@@ -947,78 +759,52 @@ test "base64 known values" {
     try testing.expectEqualStrings("BA==", encoded);
 }
 
-test "candid field hash" {
-    // Known hashes from the Candid spec
-    try testing.expectEqual(@as(u32, 4849238), candid.fieldHash("arg"));
-    // Fields must sort by hash; verify ordering
-    var prev: u32 = 0;
-    for (candid.install_code_fields) |f| {
-        try testing.expect(f.hash >= prev);
-        prev = f.hash;
-    }
-    prev = 0;
-    for (candid.mode_variants) |v| {
-        try testing.expect(v.hash >= prev);
-        prev = v.hash;
-    }
+test "candid encode empty record" {
+    const EmptyRecord = struct {};
+    const bytes = try candid.encode(testing.allocator, .{EmptyRecord{}});
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("DIDL", bytes[0..4]);
 }
 
-test "candid empty record encoding" {
-    const expected = "DIDL" ++ [_]u8{ 0x01, 0x6c, 0x00, 0x01, 0x00 };
-    try testing.expectEqualSlices(u8, expected, &candid.empty_record_args);
-}
-
-test "candid encode install_code args" {
+test "candid encode install_code round-trip" {
+    const InstallCodeMode = union(enum) { install: void, reinstall: void, upgrade: void };
+    const InstallCodeArgs = struct {
+        arg: candid.Blob,
+        canister_id: candid.Principal,
+        mode: InstallCodeMode,
+        wasm_module: candid.Blob,
+    };
     const canister_id = &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01 };
-    const wasm = &[_]u8{ 0x00, 0x61, 0x73, 0x6d }; // \0asm
-    const arg = "";
-
-    const encoded = try candid.encodeInstallCodeArgs(
-        testing.allocator,
-        .install,
-        canister_id,
-        wasm,
-        arg,
-    );
+    const wasm = &[_]u8{ 0x00, 0x61, 0x73, 0x6d };
+    const encoded = try candid.encode(testing.allocator, .{InstallCodeArgs{
+        .arg = candid.Blob.from(""),
+        .canister_id = candid.Principal.from(canister_id),
+        .mode = .{ .install = {} },
+        .wasm_module = candid.Blob.from(wasm),
+    }});
     defer testing.allocator.free(encoded);
-
-    // Verify magic
     try testing.expectEqualStrings("DIDL", encoded[0..4]);
-
-    // Verify it starts with valid Candid: 3 types
-    var pos: usize = 4;
-    const type_count = readUleb128(encoded, &pos);
-    try testing.expectEqual(@as(usize, 3), type_count);
-
-    // Decode the result back to verify the principal is recoverable
-    // by checking the encoded data is non-empty and well-formed
     try testing.expect(encoded.len > 20);
+
+    const decoded = try candid.decode(InstallCodeArgs, testing.allocator, encoded);
+    defer testing.allocator.free(decoded.arg.data);
+    defer testing.allocator.free(decoded.canister_id.bytes);
+    defer testing.allocator.free(decoded.wasm_module.data);
+    try testing.expectEqualSlices(u8, canister_id, decoded.canister_id.bytes);
+    try testing.expectEqualSlices(u8, wasm, decoded.wasm_module.data);
 }
 
 test "candid decode principal from record" {
-    // Manually construct: DIDL + 1 type (record, 1 field canister_id:principal) + 1 arg + value
-    var buf = ManagedList.init(testing.allocator);
-    defer buf.deinit();
-
-    try buf.appendSlice("DIDL");
-    try appendUleb128(&buf, 1); // 1 type
-    try appendSleb128(&buf, -20); // record
-    try appendUleb128(&buf, 1); // 1 field
-    try appendUleb128(&buf, candid.fieldHash("canister_id")); // field hash
-    try appendSleb128(&buf, -24); // principal
-    try appendUleb128(&buf, 1); // 1 arg
-    try appendSleb128(&buf, 0); // type 0
-
-    // Value: principal
+    const CreateResult = struct { canister_id: candid.Principal };
     const principal_bytes = &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01 };
-    try buf.append(0x01); // present
-    try appendUleb128(&buf, principal_bytes.len);
-    try buf.appendSlice(principal_bytes);
+    const encoded = try candid.encode(testing.allocator, .{CreateResult{
+        .canister_id = candid.Principal.from(principal_bytes),
+    }});
+    defer testing.allocator.free(encoded);
 
-    const decoded = try candid.decodePrincipalFromRecord(testing.allocator, buf.items);
-    defer testing.allocator.free(decoded);
-
-    try testing.expectEqualSlices(u8, principal_bytes, decoded);
+    const decoded = try candid.decode(CreateResult, testing.allocator, encoded);
+    defer testing.allocator.free(decoded.canister_id.bytes);
+    try testing.expectEqualSlices(u8, principal_bytes, decoded.canister_id.bytes);
 }
 
 test "buildInstanceConfigJson default" {

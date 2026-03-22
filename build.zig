@@ -39,12 +39,14 @@ pub fn addTests(
     b: *std.Build,
     dep: *std.Build.Dependency,
 ) *std.Build.Step.Run {
+    const cdk_mod = dep.module("cdk");
     const pic_mod = dep.module("pocket-ic");
     const test_mod = b.createModule(.{
         .root_source_file = b.path("test.zig"),
         .target = b.standardTargetOptions(.{}),
         .optimize = b.standardOptimizeOption(.{}),
         .imports = &.{
+            .{ .name = "cdk", .module = cdk_mod },
             .{ .name = "pocket-ic", .module = pic_mod },
         },
     });
@@ -57,12 +59,13 @@ pub fn addTests(
 }
 
 pub fn build(b: *std.Build) void {
-    _ = b.addModule("cdk", .{
+    const cdk_mod = b.addModule("cdk", .{
         .root_source_file = b.path("src/cdk.zig"),
     });
 
     _ = b.addModule("pocket-ic", .{
         .root_source_file = b.path("src/pocket_ic.zig"),
+        .imports = &.{.{ .name = "cdk", .module = cdk_mod }},
     });
 
     const target = b.standardTargetOptions(.{});
@@ -74,15 +77,18 @@ pub fn build(b: *std.Build) void {
         "src/principal.zig",
         "src/pocket_ic.zig",
         "src/stable/stable.zig",
+        "src/candid/candid.zig",
     };
     for (test_files) |file| {
-        const t = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(file),
-                .target = target,
-                .optimize = optimize,
-            }),
+        const mod = b.createModule(.{
+            .root_source_file = b.path(file),
+            .target = target,
+            .optimize = optimize,
         });
+        if (std.mem.eql(u8, file, "src/pocket_ic.zig")) {
+            mod.addImport("cdk", cdk_mod);
+        }
+        const t = b.addTest(.{ .root_module = mod });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }
 
