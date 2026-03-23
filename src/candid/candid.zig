@@ -21,10 +21,14 @@ pub const empty_args = encoding.empty_args;
 
 pub const decode = decoding.decode;
 pub const decodeAdvanced = decoding.decodeAdvanced;
+pub const decodeOwned = decoding.decodeOwned;
+pub const decodeOwnedAdvanced = decoding.decodeOwnedAdvanced;
 pub const decodeMany = decoding.decodeMany;
 pub const decodeManyAdvanced = decoding.decodeManyAdvanced;
+pub const Decoded = decoding.Decoded;
 pub const DecodeOptions = decoding.DecodeOptions;
 pub const DecodeError = decoding.DecodeError;
+pub const freeDecoded = decoding.freeDecoded;
 
 test {
     _ = types;

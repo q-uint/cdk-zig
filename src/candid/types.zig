@@ -124,11 +124,7 @@ pub fn fieldHash(comptime name: []const u8) u32 {
     // This allows Zig types to use @"0", @"1", etc. as field names for
     // numbered candid fields.
     if (parseNumericHash(name)) |n| return n;
-    var h: u32 = 0;
-    for (name) |c| {
-        h = h *% 223 +% c;
-    }
-    return h;
+    return fieldHashRuntime(name);
 }
 
 fn parseNumericHash(comptime name: []const u8) ?u32 {
@@ -136,7 +132,9 @@ fn parseNumericHash(comptime name: []const u8) ?u32 {
     var n: u32 = 0;
     for (name) |c| {
         if (c < '0' or c > '9') return null;
-        n = n *% 10 +% (c - '0');
+        const digit: u32 = c - '0';
+        n = std.math.mul(u32, n, 10) catch return null;
+        n = std.math.add(u32, n, digit) catch return null;
     }
     return n;
 }
@@ -146,6 +144,12 @@ pub fn isPrimitive(comptime T: type) bool {
         .int, .float => true,
         else => false,
     };
+}
+
+pub fn isFuncType(comptime T: type) bool {
+    const info = @typeInfo(T);
+    if (info != .@"struct") return false;
+    return @hasDecl(T, "annotation") and @TypeOf(T.annotation) == FuncAnnotation;
 }
 
 pub fn isText(comptime T: type) bool {
@@ -236,4 +240,21 @@ test "field hash known values" {
     try testing.expectEqual(@as(u32, 0), fieldHash(""));
     try testing.expectEqual(fieldHash("name"), fieldHash("name"));
     try testing.expect(fieldHash("age") < fieldHash("name"));
+}
+
+test "parseNumericHash overflow falls through to string hash" {
+    // "99999999999" overflows u32 (max 4294967295), so it must not be
+    // treated as a numeric field. It should fall through to the string
+    // hash instead.
+    const overflow_name = "99999999999";
+    const hash = fieldHash(overflow_name);
+
+    // If parseNumericHash correctly returns null on overflow, fieldHash
+    // computes the string hash. The string hash for this input is not
+    // the wrapped numeric value.
+    var expected: u32 = 0;
+    for (overflow_name) |c| {
+        expected = expected *% 223 +% c;
+    }
+    try testing.expectEqual(expected, hash);
 }

@@ -57,11 +57,11 @@ fn fld(hash: u32, type_ref: i32) FieldEntry {
 // Assertion helpers
 
 fn sub(table: []const TypeEntry, t1: i32, t2: i32) !void {
-    try testing.expect(isSubtype(table, t1, t2));
+    try testing.expect(try isSubtype(table, t1, t2, testing.allocator));
 }
 
 fn notSub(table: []const TypeEntry, t1: i32, t2: i32) !void {
-    try testing.expect(!isSubtype(table, t1, t2));
+    try testing.expect(!try isSubtype(table, t1, t2, testing.allocator));
 }
 
 // -- reflexive cases --
@@ -449,4 +449,18 @@ test "subtypes: (future type) </: (nat)" {
         .{ .opcode = -25 }, // 0: future type
     };
     try notSub(&table, 0, type_nat);
+}
+
+test "subtypes: subtype check works with >64 type table entries" {
+    // Build a table with 65 entries. Entries 0 and 1 are identical
+    // records that should be subtypes of each other. Entries 2-64
+    // are padding (opt null).
+    var table: [65]TypeEntry = undefined;
+    const fields = &[_]FieldEntry{fld(0, type_nat)};
+    table[0] = rec(fields);
+    table[1] = rec(fields);
+    for (2..65) |i| {
+        table[i] = opt_(type_null);
+    }
+    try sub(&table, 0, 1);
 }

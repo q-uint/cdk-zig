@@ -915,3 +915,41 @@ test "construct: skipping future type with data" {
     try testing.expectEqual(@as(?Empty, null), val[0]);
     try testing.expectEqual(true, val[1]);
 }
+
+test "construct: skipping future type with references" {
+    // Future type value: m=0 data bytes, n=1 reference.
+    // The reference is a bool (type -2 = 0x7e) with value 0x01.
+    // If skipValue ignores n, the bool reference bytes remain unconsumed
+    // and corrupt the next value (the actual bool arg).
+    //
+    // Type table: 1 entry, opcode 0x67 (-25), 0 type data bytes
+    // Args: 2 - type 0 (future), type bool (0x7e)
+    // Values: future(m=0, n=1, ref=bool(true)), bool(false)
+    const val = try decodeMany(
+        struct { ?Empty, bool },
+        testing.allocator,
+        comptime x("DIDL\\01\\67\\00\\02\\00\\7e\\00\\01\\7e\\01\\00"),
+    );
+    try testing.expectEqual(@as(?Empty, null), val[0]);
+    try testing.expectEqual(false, val[1]);
+}
+
+// -- freeDecoded recursion --
+
+test "construct: trailing bytes frees nested struct allocations" {
+    // Encode a struct with a nested struct containing allocated text,
+    // then append a trailing byte. freeDecoded must recurse into the
+    // nested struct to free the text, otherwise testing.allocator will
+    // report a leak.
+    const Inner = struct { name: []const u8 };
+    const Outer = struct { inner: Inner };
+    const valid = try lib.encode(testing.allocator, .{Outer{ .inner = .{ .name = "hello" } }});
+    defer testing.allocator.free(valid);
+
+    const with_trail = try testing.allocator.alloc(u8, valid.len + 1);
+    defer testing.allocator.free(with_trail);
+    @memcpy(with_trail[0..valid.len], valid);
+    with_trail[valid.len] = 0;
+
+    try testing.expectError(error.TrailingBytes, decode(Outer, testing.allocator, with_trail));
+}

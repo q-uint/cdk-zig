@@ -3,49 +3,6 @@ const leb = std.leb;
 const Allocator = std.mem.Allocator;
 const List = std.array_list.AlignedManaged(u8, null);
 const t = @import("types.zig");
-const Principal = t.Principal;
-const Blob = t.Blob;
-const Reserved = t.Reserved;
-const Func = t.Func;
-const FuncAnnotation = t.FuncAnnotation;
-const Service = t.Service;
-const fieldHash = t.fieldHash;
-const isPrimitive = t.isPrimitive;
-const isText = t.isText;
-const sortedStructFields = t.sortedStructFields;
-
-fn isFuncType(comptime T: type) bool {
-    const info = @typeInfo(T);
-    if (info != .@"struct") return false;
-    return @hasDecl(T, "annotation") and @TypeOf(T.annotation) == FuncAnnotation;
-}
-const sortedUnionFields = t.sortedUnionFields;
-const ulebComptime = t.ulebComptime;
-const slebComptime = t.slebComptime;
-
-const type_null = t.type_null;
-const type_bool = t.type_bool;
-const type_nat = t.type_nat;
-const type_int = t.type_int;
-const type_nat8 = t.type_nat8;
-const type_nat16 = t.type_nat16;
-const type_nat32 = t.type_nat32;
-const type_nat64 = t.type_nat64;
-const type_int8 = t.type_int8;
-const type_int16 = t.type_int16;
-const type_int32 = t.type_int32;
-const type_int64 = t.type_int64;
-const type_float32 = t.type_float32;
-const type_float64 = t.type_float64;
-const type_text = t.type_text;
-const type_reserved = t.type_reserved;
-const type_opt = t.type_opt;
-const type_vec = t.type_vec;
-const type_record = t.type_record;
-const type_variant = t.type_variant;
-const type_func = t.type_func;
-const type_service = t.type_service;
-const type_principal = t.type_principal;
 
 pub const empty_args: []const u8 = &[_]u8{ 'D', 'I', 'D', 'L', 0x00, 0x00 };
 
@@ -69,17 +26,17 @@ pub fn encode(alloc: Allocator, args: anytype) ![]const u8 {
     return list.toOwnedSlice();
 }
 
-fn encodeValue(writer: anytype, comptime T: type, value: T) anyerror!void {
-    if (T == Principal) {
+fn encodeValue(writer: anytype, comptime T: type, value: T) Allocator.Error!void {
+    if (T == t.Principal) {
         try writer.writeByte(1);
         try leb.writeUleb128(writer, @as(u32, @intCast(value.bytes.len)));
         return writer.writeAll(value.bytes);
     }
-    if (T == Blob) {
+    if (T == t.Blob) {
         try leb.writeUleb128(writer, @as(u32, @intCast(value.data.len)));
         return writer.writeAll(value.data);
     }
-    if (comptime isFuncType(T)) {
+    if (comptime t.isFuncType(T)) {
         try writer.writeByte(1);
         try writer.writeByte(1);
         try leb.writeUleb128(writer, @as(u32, @intCast(value.service.bytes.len)));
@@ -87,12 +44,12 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) anyerror!void {
         try leb.writeUleb128(writer, @as(u32, @intCast(value.method.len)));
         return writer.writeAll(value.method);
     }
-    if (T == Service) {
+    if (T == t.Service) {
         try writer.writeByte(1);
         try leb.writeUleb128(writer, @as(u32, @intCast(value.principal.bytes.len)));
         return writer.writeAll(value.principal.bytes);
     }
-    if (T == Reserved) return;
+    if (T == t.Reserved) return;
 
     switch (@typeInfo(T)) {
         .bool => return writer.writeByte(if (value) 1 else 0),
@@ -143,7 +100,7 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) anyerror!void {
             }
         },
         .@"struct" => {
-            const sorted = comptime sortedStructFields(T);
+            const sorted = comptime t.sortedStructFields(T);
             inline for (sorted) |f| {
                 try encodeValue(writer, f.field_type, @field(value, f.name));
             }
@@ -151,7 +108,7 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) anyerror!void {
         .@"union" => {
             switch (value) {
                 inline else => |payload, tag| {
-                    const sorted = comptime sortedUnionFields(T);
+                    const sorted = comptime t.sortedUnionFields(T);
                     const idx: u32 = comptime blk: {
                         for (sorted, 0..) |sf, i| {
                             if (std.mem.eql(u8, @tagName(tag), sf.name))
@@ -180,15 +137,15 @@ fn buildHeader(comptime ArgsType: type) []const u8 {
         }
 
         var bytes: []const u8 = "DIDL";
-        bytes = bytes ++ ulebComptime(compound.len);
+        bytes = bytes ++ t.ulebComptime(compound.len);
 
         for (compound) |ct| {
             bytes = bytes ++ typeDef(ct, compound);
         }
 
-        bytes = bytes ++ ulebComptime(fields.len);
+        bytes = bytes ++ t.ulebComptime(fields.len);
         for (fields) |f| {
-            bytes = bytes ++ slebComptime(typeRef(f.type, compound));
+            bytes = bytes ++ t.slebComptime(typeRef(f.type, compound));
         }
 
         return bytes;
@@ -196,10 +153,10 @@ fn buildHeader(comptime ArgsType: type) []const u8 {
 }
 
 fn collectCompound(comptime T: type, comptime existing: []const type) []const type {
-    if (T == Blob or comptime isFuncType(T) or T == Service) return appendType(existing, T);
-    if (T == Principal or T == Reserved or T == void or T == bool) return existing;
-    if (comptime isText(T)) return existing;
-    if (comptime isPrimitive(T)) return existing;
+    if (T == t.Blob or comptime t.isFuncType(T) or T == t.Service) return appendType(existing, T);
+    if (T == t.Principal or T == t.Reserved or T == void or T == bool) return existing;
+    if (comptime t.isText(T)) return existing;
+    if (comptime t.isPrimitive(T)) return existing;
 
     switch (@typeInfo(T)) {
         .optional => |o| {
@@ -242,30 +199,30 @@ fn appendType(comptime existing: []const type, comptime T: type) []const type {
 }
 
 fn typeDef(comptime T: type, comptime table: []const type) []const u8 {
-    if (T == Blob) return slebComptime(type_vec) ++ slebComptime(type_nat8);
-    if (comptime isFuncType(T)) {
+    if (T == t.Blob) return t.slebComptime(t.type_vec) ++ t.slebComptime(t.type_nat8);
+    if (comptime t.isFuncType(T)) {
         const ann = @intFromEnum(T.annotation);
-        return slebComptime(type_func) ++ ulebComptime(0) ++ ulebComptime(0) ++
-            if (ann != 0) ulebComptime(1) ++ ulebComptime(ann) else ulebComptime(0);
+        return t.slebComptime(t.type_func) ++ t.ulebComptime(0) ++ t.ulebComptime(0) ++
+            if (ann != 0) t.ulebComptime(1) ++ t.ulebComptime(ann) else t.ulebComptime(0);
     }
-    if (T == Service) return slebComptime(type_service) ++ ulebComptime(0);
+    if (T == t.Service) return t.slebComptime(t.type_service) ++ t.ulebComptime(0);
 
     switch (@typeInfo(T)) {
-        .optional => |o| return slebComptime(type_opt) ++ slebComptime(typeRef(o.child, table)),
-        .pointer => |p| return slebComptime(type_vec) ++ slebComptime(typeRef(p.child, table)),
+        .optional => |o| return t.slebComptime(t.type_opt) ++ t.slebComptime(typeRef(o.child, table)),
+        .pointer => |p| return t.slebComptime(t.type_vec) ++ t.slebComptime(typeRef(p.child, table)),
         .@"struct" => {
-            const sorted = sortedStructFields(T);
-            var bytes: []const u8 = slebComptime(type_record) ++ ulebComptime(sorted.len);
+            const sorted = t.sortedStructFields(T);
+            var bytes: []const u8 = t.slebComptime(t.type_record) ++ t.ulebComptime(sorted.len);
             for (sorted) |sf| {
-                bytes = bytes ++ ulebComptime(sf.hash) ++ slebComptime(typeRef(sf.field_type, table));
+                bytes = bytes ++ t.ulebComptime(sf.hash) ++ t.slebComptime(typeRef(sf.field_type, table));
             }
             return bytes;
         },
         .@"union" => {
-            const sorted = sortedUnionFields(T);
-            var bytes: []const u8 = slebComptime(type_variant) ++ ulebComptime(sorted.len);
+            const sorted = t.sortedUnionFields(T);
+            var bytes: []const u8 = t.slebComptime(t.type_variant) ++ t.ulebComptime(sorted.len);
             for (sorted) |sf| {
-                bytes = bytes ++ ulebComptime(sf.hash) ++ slebComptime(typeRef(sf.field_type, table));
+                bytes = bytes ++ t.ulebComptime(sf.hash) ++ t.slebComptime(typeRef(sf.field_type, table));
             }
             return bytes;
         },
@@ -274,37 +231,37 @@ fn typeDef(comptime T: type, comptime table: []const type) []const u8 {
 }
 
 fn typeRef(comptime T: type, comptime table: []const type) i32 {
-    if (T == void) return type_null;
-    if (T == Reserved) return type_reserved;
-    if (T == Principal) return type_principal;
+    if (T == void) return t.type_null;
+    if (T == t.Reserved) return t.type_reserved;
+    if (T == t.Principal) return t.type_principal;
 
     switch (@typeInfo(T)) {
-        .bool => return type_bool,
+        .bool => return t.type_bool,
         .int => |info| return switch (info.signedness) {
             .unsigned => switch (info.bits) {
-                8 => type_nat8,
-                16 => type_nat16,
-                32 => type_nat32,
-                64 => type_nat64,
-                128 => type_nat,
+                8 => t.type_nat8,
+                16 => t.type_nat16,
+                32 => t.type_nat32,
+                64 => t.type_nat64,
+                128 => t.type_nat,
                 else => @compileError("unsupported int width"),
             },
             .signed => switch (info.bits) {
-                8 => type_int8,
-                16 => type_int16,
-                32 => type_int32,
-                64 => type_int64,
-                128 => type_int,
+                8 => t.type_int8,
+                16 => t.type_int16,
+                32 => t.type_int32,
+                64 => t.type_int64,
+                128 => t.type_int,
                 else => @compileError("unsupported int width"),
             },
         },
         .float => |info| return switch (info.bits) {
-            32 => type_float32,
-            64 => type_float64,
+            32 => t.type_float32,
+            64 => t.type_float64,
             else => @compileError("unsupported float width"),
         },
         .pointer => |p| {
-            if (p.size == .slice and p.child == u8) return type_text;
+            if (p.size == .slice and p.child == u8) return t.type_text;
             if (p.size == .one) return typeRef(p.child, table);
             return tableIndex(T, table);
         },
@@ -381,7 +338,7 @@ test "encode record" {
 
 test "encode principal" {
     const p = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01 };
-    const bytes = try encode(testing.allocator, .{Principal.from(&p)});
+    const bytes = try encode(testing.allocator, .{t.Principal.from(&p)});
     defer testing.allocator.free(bytes);
     try testing.expectEqualSlices(u8, &[_]u8{
         'D',  'I',  'D',  'L',  0x00, 0x01, 0x68,
@@ -391,7 +348,7 @@ test "encode principal" {
 }
 
 test "encode blob" {
-    const bytes = try encode(testing.allocator, .{Blob.from(&[_]u8{ 1, 2, 3 })});
+    const bytes = try encode(testing.allocator, .{t.Blob.from(&[_]u8{ 1, 2, 3 })});
     defer testing.allocator.free(bytes);
     try testing.expectEqualSlices(u8, &[_]u8{
         'D',  'I', 'D', 'L', 0x01, 0x6d, 0x7b, 0x01, 0x00,
@@ -465,11 +422,11 @@ test "round-trip recursive variant (tree)" {
 
 test "round-trip func" {
     const pid = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01 };
-    const f = Func.from(Principal.from(&pid), "greet");
+    const f = t.Func.from(t.Principal.from(&pid), "greet");
     const bytes = try encode(testing.allocator, .{f});
     defer testing.allocator.free(bytes);
 
-    const decoded = try decode(Func, testing.allocator, bytes);
+    const decoded = try decode(t.Func, testing.allocator, bytes);
     defer testing.allocator.free(decoded.service.bytes);
     defer testing.allocator.free(decoded.method);
     try testing.expectEqualSlices(u8, &pid, decoded.service.bytes);
@@ -478,11 +435,11 @@ test "round-trip func" {
 
 test "round-trip service" {
     const pid = [_]u8{ 0xAB, 0xCD, 0x01 };
-    const svc = Service.from(Principal.from(&pid));
+    const svc = t.Service.from(t.Principal.from(&pid));
     const bytes = try encode(testing.allocator, .{svc});
     defer testing.allocator.free(bytes);
 
-    const decoded = try decode(Service, testing.allocator, bytes);
+    const decoded = try decode(t.Service, testing.allocator, bytes);
     defer testing.allocator.free(decoded.principal.bytes);
     try testing.expectEqualSlices(u8, &pid, decoded.principal.bytes);
 }

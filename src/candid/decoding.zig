@@ -2,77 +2,6 @@ const std = @import("std");
 const leb = std.leb;
 const Allocator = std.mem.Allocator;
 const t = @import("types.zig");
-const Principal = t.Principal;
-const Blob = t.Blob;
-const Reserved = t.Reserved;
-const Empty = t.Empty;
-const RecursiveOpt = t.RecursiveOpt;
-const Func = t.Func;
-const FuncAnnotation = t.FuncAnnotation;
-const Service = t.Service;
-const fieldHash = t.fieldHash;
-const isText = t.isText;
-
-fn isFuncType(comptime T: type) bool {
-    const info = @typeInfo(T);
-    if (info != .@"struct") return false;
-    return @hasDecl(T, "annotation") and @TypeOf(T.annotation) == FuncAnnotation;
-}
-
-fn hasDefault(comptime T: type) bool {
-    if (T == void) return true;
-    if (T == Reserved) return true;
-    if (@typeInfo(T) == .optional) return true;
-    return false;
-}
-
-fn defaultValue(comptime T: type) T {
-    if (T == void) return {};
-    if (T == Reserved) return .{};
-    if (@typeInfo(T) == .optional) return null;
-    unreachable;
-}
-
-fn freeDecoded(comptime T: type, alloc: Allocator, val: T) void {
-    if (T == Principal) {
-        alloc.free(val.bytes);
-        return;
-    }
-    if (comptime isFuncType(T)) {
-        alloc.free(val.service.bytes);
-        alloc.free(val.method);
-        return;
-    }
-    if (T == Service) {
-        alloc.free(val.principal.bytes);
-        return;
-    }
-    if (T == Blob) {
-        alloc.free(val.data);
-        return;
-    }
-    switch (@typeInfo(T)) {
-        .pointer => |p| {
-            if (p.size == .slice) {
-                alloc.free(val);
-            } else if (p.size == .one) {
-                freeDecoded(p.child, alloc, val.*);
-                alloc.destroy(val);
-            }
-        },
-        .optional => {
-            if (val) |v| freeDecoded(@typeInfo(T).optional.child, alloc, v);
-        },
-        else => {},
-    }
-}
-
-fn mapLebError(err: anytype) DecodeError {
-    return switch (@as(anyerror, err)) {
-        error.EndOfStream => error.EndOfStream,
-        else => error.Overflow,
-    };
-}
 
 const type_null = t.type_null;
 const type_bool = t.type_bool;
@@ -98,6 +27,100 @@ const type_variant = t.type_variant;
 const type_func = t.type_func;
 const type_service = t.type_service;
 const type_principal = t.type_principal;
+
+fn hasDefault(comptime T: type) bool {
+    if (T == void) return true;
+    if (T == t.Reserved) return true;
+    if (@typeInfo(T) == .optional) return true;
+    return false;
+}
+
+fn defaultValue(comptime T: type) T {
+    if (T == void) return {};
+    if (T == t.Reserved) return .{};
+    if (@typeInfo(T) == .optional) return null;
+    unreachable;
+}
+
+pub fn Decoded(comptime T: type) type {
+    return struct {
+        value: T,
+        alloc: Allocator,
+
+        pub fn deinit(self: *@This()) void {
+            freeDecoded(T, self.alloc, self.value);
+            self.* = undefined;
+        }
+    };
+}
+
+pub fn decodeOwned(comptime T: type, alloc: Allocator, data: []const u8) DecodeError!Decoded(T) {
+    return decodeOwnedAdvanced(T, alloc, data, .{});
+}
+
+pub fn decodeOwnedAdvanced(comptime T: type, alloc: Allocator, data: []const u8, options: DecodeOptions) DecodeError!Decoded(T) {
+    const val = try decodeAdvanced(T, alloc, data, options);
+    return .{ .value = val, .alloc = alloc };
+}
+
+pub fn freeDecoded(comptime T: type, alloc: Allocator, val: T) void {
+    if (T == t.Principal) {
+        alloc.free(val.bytes);
+        return;
+    }
+    if (comptime t.isFuncType(T)) {
+        alloc.free(val.service.bytes);
+        alloc.free(val.method);
+        return;
+    }
+    if (T == t.Service) {
+        alloc.free(val.principal.bytes);
+        return;
+    }
+    if (T == t.Blob) {
+        alloc.free(val.data);
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .pointer => |p| {
+            if (p.size == .slice) {
+                for (val) |item| {
+                    freeDecoded(p.child, alloc, item);
+                }
+                alloc.free(val);
+            } else if (p.size == .one) {
+                freeDecoded(p.child, alloc, val.*);
+                alloc.destroy(val);
+            }
+        },
+        .optional => {
+            if (val) |v| freeDecoded(@typeInfo(T).optional.child, alloc, v);
+        },
+        .@"struct" => |s| {
+            inline for (s.fields) |field| {
+                freeDecoded(field.type, alloc, @field(val, field.name));
+            }
+        },
+        .@"union" => |u| {
+            if (u.tag_type) |_| {
+                inline for (u.fields) |field| {
+                    if (val == @field(T, field.name)) {
+                        freeDecoded(field.type, alloc, @field(val, field.name));
+                        return;
+                    }
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+fn mapLebError(err: anytype) DecodeError {
+    return switch (@as(anyerror, err)) {
+        error.EndOfStream => error.EndOfStream,
+        else => error.Overflow,
+    };
+}
 
 pub const DecodeError = error{
     InvalidMagic,
@@ -211,6 +234,24 @@ pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const 
         }
     }
 
+    // Pre-compute unguarded cycle flags: a single pass over the type
+    // table replaces the per-field allocations that decodeRecord/decodeVariant
+    // previously performed.
+    const cycle_flags = if (type_count > 0) blk: {
+        const flags = alloc.alloc(bool, type_count) catch return error.OutOfMemory;
+        const visited = alloc.alloc(bool, type_count) catch return error.OutOfMemory;
+        defer alloc.free(visited);
+        for (0..type_count) |i| {
+            @memset(visited, false);
+            flags[i] = hasUnguardedCycleInner(type_table, @intCast(i), visited);
+        }
+        break :blk flags;
+    } else blk: {
+        var empty: [0]bool = .{};
+        break :blk @as([]bool, &empty);
+    };
+    defer if (type_count > 0) alloc.free(cycle_flags);
+
     const arg_count = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
 
     var ref_buf: [0]i32 = .{};
@@ -228,7 +269,7 @@ pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const 
     var result: Types = undefined;
     inline for (fields, 0..) |field, i| {
         if (i < readable) {
-            result[i] = try decodeValue(field.type, reader, type_table, all_refs[i], alloc, data.len, options);
+            result[i] = try decodeValue(field.type, reader, type_table, all_refs[i], alloc, data.len, options, cycle_flags);
         } else {
             if (comptime !hasDefault(field.type)) return error.TypeMismatch;
             result[i] = defaultValue(field.type);
@@ -270,14 +311,8 @@ pub const TypeEntry = struct {
 // Detect if a record/variant type can reach itself through record/variant
 // fields only (no opt/vec in the path). Such cycles create infinite
 // structures with no base case.
-fn hasUnguardedCycle(table: []const TypeEntry, start: u32) bool {
-    var visited = [_]bool{false} ** 256;
-    if (start >= 256) return false;
-    return hasUnguardedCycleInner(table, start, &visited);
-}
-
-fn hasUnguardedCycleInner(table: []const TypeEntry, ref_u: u32, visited: *[256]bool) bool {
-    if (ref_u >= table.len or ref_u >= 256) return false;
+fn hasUnguardedCycleInner(table: []const TypeEntry, ref_u: u32, visited: []bool) bool {
+    if (ref_u >= table.len) return false;
     if (visited[ref_u]) return true;
     const entry = table[ref_u];
     switch (entry.opcode) {
@@ -310,7 +345,10 @@ fn hasUnguardedCycleInner(table: []const TypeEntry, ref_u: u32, visited: *[256]b
 
 fn isValidRef(ref: i32, table_len: u32) bool {
     if (ref >= 0) return @as(u32, @intCast(ref)) < table_len;
-    // Valid primitive type codes: -1 (null) through -17 (empty) and -24 (principal)
+    // Primitive type codes -1 (null) through -17 (empty) and -24 (principal)
+    // are valid as bare refs. Compound opcodes -18 through -23 (opt, vec,
+    // record, variant, func, service) are only valid inside the type table,
+    // not as standalone refs.
     if (ref >= type_empty and ref <= type_null) return true;
     if (ref == type_principal) return true;
     return false;
@@ -365,32 +403,31 @@ fn parseTypeEntry(reader: anytype, alloc: Allocator, data_len: usize) !TypeEntry
             if (nm > data_len / 2) return error.EndOfStream;
             const methods = try alloc.alloc(FieldEntry, nm);
             errdefer alloc.free(methods);
-            var prev_name_buf: [256]u8 = undefined;
-            var prev_name_len: usize = 0;
-            var has_prev = false;
+            var stack_bufs: [2][256]u8 = undefined;
+            var cur_stack: u1 = 0;
+            var prev_name: []u8 = &.{};
+            var prev_heap: ?[]u8 = null;
+            defer if (prev_heap) |h| alloc.free(h);
             for (methods) |*m| {
                 const name_len = try leb.readUleb128(u32, reader);
                 if (name_len > data_len) return error.EndOfStream;
-                var name_buf: [256]u8 = undefined;
-                if (name_len <= name_buf.len) {
-                    const name = name_buf[0..name_len];
-                    reader.readNoEof(name) catch return error.EndOfStream;
-                    if (!std.unicode.utf8ValidateSlice(name))
+                const is_heap = name_len > stack_bufs[0].len;
+                const name = if (is_heap)
+                    alloc.alloc(u8, name_len) catch return error.OutOfMemory
+                else
+                    stack_bufs[cur_stack][0..name_len];
+                reader.readNoEof(name) catch return error.EndOfStream;
+                if (!std.unicode.utf8ValidateSlice(name))
+                    return error.UnsupportedType;
+                if (prev_name.len > 0) {
+                    if (std.mem.order(u8, name, prev_name) != .gt)
                         return error.UnsupportedType;
-                    if (has_prev) {
-                        const prev = prev_name_buf[0..prev_name_len];
-                        if (std.mem.order(u8, name, prev) != .gt)
-                            return error.UnsupportedType;
-                    }
-                    @memcpy(prev_name_buf[0..name_len], name);
-                    prev_name_len = name_len;
-                    has_prev = true;
-                    m.hash = t.fieldHashRuntime(name);
-                } else {
-                    try reader.skipBytes(name_len, .{});
-                    has_prev = false;
-                    m.hash = 0;
                 }
+                if (prev_heap) |h| alloc.free(h);
+                prev_heap = if (is_heap) name else null;
+                prev_name = name;
+                if (!is_heap) cur_stack ^= 1;
+                m.hash = t.fieldHashRuntime(name);
                 m.type_ref = try leb.readIleb128(i32, reader);
             }
             return .{ .opcode = opcode, .fields = methods };
@@ -411,12 +448,11 @@ fn wireOpcode(table: []const TypeEntry, ref: i32) i32 {
     return table[@intCast(ref)].opcode;
 }
 
-const max_sub_table = 64;
-
-pub fn isSubtype(table: []const TypeEntry, t1: i32, t2: i32) bool {
-    if (table.len > max_sub_table) return false;
-    var visited = [_]bool{false} ** (max_sub_table * max_sub_table);
-    return isSubtypeInner(table, t1, t2, &visited);
+pub fn isSubtype(table: []const TypeEntry, t1: i32, t2: i32, alloc: Allocator) DecodeError!bool {
+    const visited = alloc.alloc(bool, table.len * table.len) catch return error.OutOfMemory;
+    defer alloc.free(visited);
+    @memset(visited, false);
+    return isSubtypeInner(table, t1, t2, visited);
 }
 
 fn canOmit(table: []const TypeEntry, ref: i32) bool {
@@ -428,7 +464,7 @@ fn isSubtypeInner(
     table: []const TypeEntry,
     t1: i32,
     t2: i32,
-    visited: *[max_sub_table * max_sub_table]bool,
+    visited: []bool,
 ) bool {
     if (t1 == t2) return true;
 
@@ -547,14 +583,14 @@ fn isSubtypeInner(
 }
 
 fn isWireCompatible(comptime T: type, opcode: i32) bool {
-    if (T == Principal) return opcode == type_principal;
-    if (T == Blob) return opcode == type_vec;
-    if (comptime isFuncType(T)) return opcode == type_func;
-    if (T == Service) return opcode == type_service;
-    if (T == Reserved) return true;
-    if (T == RecursiveOpt) return opcode == type_opt;
+    if (T == t.Principal) return opcode == type_principal;
+    if (T == t.Blob) return opcode == type_vec;
+    if (comptime t.isFuncType(T)) return opcode == type_func;
+    if (T == t.Service) return opcode == type_service;
+    if (T == t.Reserved) return true;
+    if (T == t.RecursiveOpt) return opcode == type_opt;
     if (T == void) return opcode == type_null;
-    if (comptime isText(T)) return opcode == type_text or opcode == type_vec;
+    if (comptime t.isText(T)) return opcode == type_text or opcode == type_vec;
     switch (@typeInfo(T)) {
         .bool => return opcode == type_bool,
         .int => |info| return switch (info.signedness) {
@@ -595,20 +631,20 @@ fn isWireCompatible(comptime T: type, opcode: i32) bool {
     }
 }
 
-fn decodeValue(comptime T: type, reader: anytype, table: []const TypeEntry, ref: i32, alloc: Allocator, data_len: usize, options: DecodeOptions) DecodeError!T {
+fn decodeValue(comptime T: type, reader: anytype, table: []const TypeEntry, ref: i32, alloc: Allocator, data_len: usize, options: DecodeOptions, cycle_flags: []const bool) DecodeError!T {
     // empty type can never be decoded
-    if (T == Empty) return error.TypeMismatch;
+    if (T == t.Empty) return error.TypeMismatch;
 
-    // RecursiveOpt: decode as if target were ?RecursiveOpt (one more level of opt).
+    // t.RecursiveOpt: decode as if target were ?t.RecursiveOpt (one more level of opt).
     // The inner value is allocated on the heap to break the type recursion.
-    if (T == RecursiveOpt) {
-        const inner = try decodeValue(?RecursiveOpt, reader, table, ref, alloc, data_len, options);
+    if (T == t.RecursiveOpt) {
+        const inner = try decodeValue(?t.RecursiveOpt, reader, table, ref, alloc, data_len, options, cycle_flags);
         if (inner) |val| {
-            const ptr = alloc.create(RecursiveOpt) catch return error.OutOfMemory;
+            const ptr = alloc.create(t.RecursiveOpt) catch return error.OutOfMemory;
             ptr.* = val;
-            return RecursiveOpt{ ._inner = ptr };
+            return t.RecursiveOpt{ ._inner = ptr };
         }
-        return RecursiveOpt{ ._inner = null };
+        return t.RecursiveOpt{ ._inner = null };
     }
 
     const opcode = wireOpcode(table, ref);
@@ -619,13 +655,13 @@ fn decodeValue(comptime T: type, reader: anytype, table: []const TypeEntry, ref:
         if (opcode == type_reserved) return null;
         if (opcode != type_opt) {
             const Child = @typeInfo(T).optional.child;
-            // RecursiveOpt: the candid type `Opt = opt Opt` has infinite nesting.
+            // t.RecursiveOpt: the candid type `Opt = opt Opt` has infinite nesting.
             // A non-opt wire type can never be coerced into it (the T <: opt T
             // rule would recurse forever), so reject immediately.
-            if (Child == RecursiveOpt) return error.TypeMismatch;
+            if (Child == t.RecursiveOpt) return error.TypeMismatch;
             // T <: opt T: if wire is compatible with child, decode and wrap
             if (isWireCompatible(Child, opcode)) {
-                return try decodeValue(Child, reader, table, ref, alloc, data_len, options);
+                return try decodeValue(Child, reader, table, ref, alloc, data_len, options, cycle_flags);
             }
             // Incompatible or future type: skip value, produce null
             try skipValue(reader, table, ref);
@@ -637,7 +673,7 @@ fn decodeValue(comptime T: type, reader: anytype, table: []const TypeEntry, ref:
     if (comptime @typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one) {
         const Child = @typeInfo(T).pointer.child;
         const ptr = alloc.create(Child) catch return error.OutOfMemory;
-        ptr.* = try decodeValue(Child, reader, table, ref, alloc, data_len, options);
+        ptr.* = try decodeValue(Child, reader, table, ref, alloc, data_len, options, cycle_flags);
         return ptr;
     }
 
@@ -649,7 +685,7 @@ fn decodeValue(comptime T: type, reader: anytype, table: []const TypeEntry, ref:
     }
 
     // reserved accepts any wire type by skipping the value
-    if (T == Reserved) {
+    if (T == t.Reserved) {
         if (opcode != type_reserved) {
             try skipValue(reader, table, ref);
         }
@@ -658,7 +694,7 @@ fn decodeValue(comptime T: type, reader: anytype, table: []const TypeEntry, ref:
 
     if (ref >= 0) {
         if (@as(usize, @intCast(ref)) >= table.len) return error.TypeMismatch;
-        return decodeCompound(T, reader, table, table[@intCast(ref)], alloc, data_len, options);
+        return decodeCompound(T, reader, table, table[@intCast(ref)], alloc, data_len, options, cycle_flags);
     }
     return decodePrimitive(T, reader, ref, alloc);
 }
@@ -679,17 +715,17 @@ fn decodePrimitive(comptime T: type, reader: anytype, opcode: i32, alloc: Alloca
             return {};
         },
         type_reserved => {
-            if (T != Reserved) return error.TypeMismatch;
+            if (T != t.Reserved) return error.TypeMismatch;
             return .{};
         },
-        type_nat8 => return decodeFixedUnsigned(T, u8, reader),
-        type_nat16 => return decodeFixedUnsigned(T, u16, reader),
-        type_nat32 => return decodeFixedUnsigned(T, u32, reader),
-        type_nat64 => return decodeFixedUnsigned(T, u64, reader),
-        type_int8 => return decodeFixedSigned(T, i8, reader),
-        type_int16 => return decodeFixedSigned(T, i16, reader),
-        type_int32 => return decodeFixedSigned(T, i32, reader),
-        type_int64 => return decodeFixedSigned(T, i64, reader),
+        type_nat8 => return decodeFixed(T, u8, reader),
+        type_nat16 => return decodeFixed(T, u16, reader),
+        type_nat32 => return decodeFixed(T, u32, reader),
+        type_nat64 => return decodeFixed(T, u64, reader),
+        type_int8 => return decodeFixed(T, i8, reader),
+        type_int16 => return decodeFixed(T, i16, reader),
+        type_int32 => return decodeFixed(T, i32, reader),
+        type_int64 => return decodeFixed(T, i64, reader),
         type_nat => {
             if (T != u128) return error.TypeMismatch;
             return leb.readUleb128(u128, reader) catch |e| return mapLebError(e);
@@ -698,24 +734,15 @@ fn decodePrimitive(comptime T: type, reader: anytype, opcode: i32, alloc: Alloca
             if (T != i128) return error.TypeMismatch;
             return leb.readIleb128(i128, reader) catch |e| return mapLebError(e);
         },
-        type_float32 => return decodeFixedUnsigned(T, f32, reader),
-        type_float64 => return decodeFixedUnsigned(T, f64, reader),
+        type_float32 => return decodeFixed(T, f32, reader),
+        type_float64 => return decodeFixed(T, f64, reader),
         type_text => return decodeText(T, reader, alloc),
         type_principal => return decodePrincipal(T, reader, alloc),
         else => return error.UnsupportedType,
     }
 }
 
-fn decodeFixedUnsigned(comptime T: type, comptime Wire: type, reader: anytype) DecodeError!T {
-    if (T != Wire) return error.TypeMismatch;
-    const size = @divExact(@bitSizeOf(Wire), 8);
-    var buf: [size]u8 = undefined;
-    reader.readNoEof(&buf) catch return error.EndOfStream;
-    const Uint = std.meta.Int(.unsigned, @bitSizeOf(Wire));
-    return @bitCast(std.mem.littleToNative(Uint, @bitCast(buf)));
-}
-
-fn decodeFixedSigned(comptime T: type, comptime Wire: type, reader: anytype) DecodeError!T {
+fn decodeFixed(comptime T: type, comptime Wire: type, reader: anytype) DecodeError!T {
     if (T != Wire) return error.TypeMismatch;
     const size = @divExact(@bitSizeOf(Wire), 8);
     var buf: [size]u8 = undefined;
@@ -725,7 +752,7 @@ fn decodeFixedSigned(comptime T: type, comptime Wire: type, reader: anytype) Dec
 }
 
 fn decodeText(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {
-    if (comptime !isText(T)) return error.TypeMismatch;
+    if (comptime !t.isText(T)) return error.TypeMismatch;
     const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
     const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
     errdefer alloc.free(buf);
@@ -735,12 +762,12 @@ fn decodeText(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T
 }
 
 fn decodePrincipal(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {
-    if (T != Principal) return error.TypeMismatch;
+    if (T != t.Principal) return error.TypeMismatch;
     return decodePrincipalValue(reader, alloc);
 }
 
 fn decodeFunc(comptime T: type, reader: anytype, alloc: Allocator, entry: TypeEntry) DecodeError!T {
-    if (comptime !isFuncType(T)) return error.TypeMismatch;
+    if (comptime !t.isFuncType(T)) return error.TypeMismatch;
     // Validate annotation matches expected
     if (entry.annotations != @intFromEnum(T.annotation)) return error.TypeMismatch;
     const flag = reader.readByte() catch return error.EndOfStream;
@@ -755,7 +782,7 @@ fn decodeFunc(comptime T: type, reader: anytype, alloc: Allocator, entry: TypeEn
 }
 
 fn decodeService(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {
-    if (T != Service) return error.TypeMismatch;
+    if (T != t.Service) return error.TypeMismatch;
     const flag = reader.readByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
     const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
@@ -765,7 +792,7 @@ fn decodeService(comptime T: type, reader: anytype, alloc: Allocator) DecodeErro
     return .{ .principal = .{ .bytes = buf } };
 }
 
-fn decodePrincipalValue(reader: anytype, alloc: Allocator) DecodeError!Principal {
+fn decodePrincipalValue(reader: anytype, alloc: Allocator) DecodeError!t.Principal {
     const flag = reader.readByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
     const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
@@ -775,7 +802,7 @@ fn decodePrincipalValue(reader: anytype, alloc: Allocator) DecodeError!Principal
     return .{ .bytes = buf };
 }
 
-fn decodeCompound(comptime T: type, reader: anytype, table: []const TypeEntry, entry: TypeEntry, alloc: Allocator, data_len: usize, options: DecodeOptions) DecodeError!T {
+fn decodeCompound(comptime T: type, reader: anytype, table: []const TypeEntry, entry: TypeEntry, alloc: Allocator, data_len: usize, options: DecodeOptions, cycle_flags: []const bool) DecodeError!T {
     switch (entry.opcode) {
         type_opt => {
             if (@typeInfo(T) != .optional) return error.TypeMismatch;
@@ -787,16 +814,16 @@ fn decodeCompound(comptime T: type, reader: anytype, table: []const TypeEntry, e
                 try skipValue(reader, table, entry.inner);
                 return null;
             }
-            return try decodeValue(Child, reader, table, entry.inner, alloc, data_len, options);
+            return try decodeValue(Child, reader, table, entry.inner, alloc, data_len, options, cycle_flags);
         },
-        type_vec => return decodeVec(T, reader, table, entry, alloc, data_len, options),
+        type_vec => return decodeVec(T, reader, table, entry, alloc, data_len, options, cycle_flags),
         type_record => {
             if (@typeInfo(T) != .@"struct") return error.TypeMismatch;
-            return decodeRecord(T, reader, table, entry.fields, alloc, data_len, options);
+            return decodeRecord(T, reader, table, entry.fields, alloc, data_len, options, cycle_flags);
         },
         type_variant => {
             if (@typeInfo(T) != .@"union") return error.TypeMismatch;
-            return decodeVariant(T, reader, table, entry.fields, alloc, data_len, options);
+            return decodeVariant(T, reader, table, entry.fields, alloc, data_len, options, cycle_flags);
         },
         type_func => return decodeFunc(T, reader, alloc, entry),
         type_service => return decodeService(T, reader, alloc),
@@ -804,8 +831,8 @@ fn decodeCompound(comptime T: type, reader: anytype, table: []const TypeEntry, e
     }
 }
 
-fn decodeVec(comptime T: type, reader: anytype, table: []const TypeEntry, entry: TypeEntry, alloc: Allocator, data_len: usize, options: DecodeOptions) DecodeError!T {
-    if (T == Blob) {
+fn decodeVec(comptime T: type, reader: anytype, table: []const TypeEntry, entry: TypeEntry, alloc: Allocator, data_len: usize, options: DecodeOptions, cycle_flags: []const bool) DecodeError!T {
+    if (T == t.Blob) {
         const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
         if (len > data_len) return error.EndOfStream;
         const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
@@ -813,7 +840,7 @@ fn decodeVec(comptime T: type, reader: anytype, table: []const TypeEntry, entry:
         reader.readNoEof(buf) catch return error.EndOfStream;
         return .{ .data = buf };
     }
-    if (comptime isText(T)) {
+    if (comptime t.isText(T)) {
         if (entry.inner != type_nat8) return error.TypeMismatch;
         const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
         if (len > data_len) return error.EndOfStream;
@@ -840,8 +867,13 @@ fn decodeVec(comptime T: type, reader: anytype, table: []const TypeEntry, entry:
     if (len > max_len) return error.EndOfStream;
     const buf = alloc.alloc(Child, len) catch return error.OutOfMemory;
     errdefer alloc.free(buf);
+    var decoded_count: usize = 0;
+    errdefer for (buf[0..decoded_count]) |item| {
+        freeDecoded(Child, alloc, item);
+    };
     for (buf) |*elem| {
-        elem.* = try decodeValue(Child, reader, table, entry.inner, alloc, data_len, options);
+        elem.* = try decodeValue(Child, reader, table, entry.inner, alloc, data_len, options, cycle_flags);
+        decoded_count += 1;
     }
     return buf;
 }
@@ -854,23 +886,26 @@ fn decodeRecord(
     alloc: Allocator,
     data_len: usize,
     options: DecodeOptions,
+    cycle_flags: []const bool,
 ) DecodeError!T {
     const zig_fields = @typeInfo(T).@"struct".fields;
     var result: T = undefined;
     var found = [_]bool{false} ** zig_fields.len;
+    errdefer inline for (zig_fields, 0..) |zf, i| {
+        if (found[i]) {
+            freeDecoded(zf.type, alloc, @field(result, zf.name));
+        }
+    };
 
     for (wire_fields) |wf| {
-        // Check for unguarded cycles before decoding field values.
-        // A field pointing to a record/variant that cycles back without
-        // opt/vec guard would cause infinite recursion.
-        if (wf.type_ref >= 0 and @as(usize, @intCast(wf.type_ref)) < table.len) {
-            if (hasUnguardedCycle(table, @intCast(wf.type_ref))) return error.EndOfStream;
+        if (wf.type_ref >= 0 and @as(usize, @intCast(wf.type_ref)) < cycle_flags.len) {
+            if (cycle_flags[@intCast(wf.type_ref)]) return error.EndOfStream;
         }
         var matched = false;
         inline for (zig_fields, 0..) |zf, i| {
-            const expected_id = comptime if (@typeInfo(T).@"struct".is_tuple) @as(u32, i) else fieldHash(zf.name);
+            const expected_id = comptime if (@typeInfo(T).@"struct".is_tuple) @as(u32, i) else t.fieldHash(zf.name);
             if (wf.hash == expected_id) {
-                @field(result, zf.name) = try decodeValue(zf.type, reader, table, wf.type_ref, alloc, data_len, options);
+                @field(result, zf.name) = try decodeValue(zf.type, reader, table, wf.type_ref, alloc, data_len, options, cycle_flags);
                 found[i] = true;
                 matched = true;
             }
@@ -904,24 +939,24 @@ fn decodeVariant(
     alloc: Allocator,
     data_len: usize,
     options: DecodeOptions,
+    cycle_flags: []const bool,
 ) DecodeError!T {
     const idx = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
     if (idx >= wire_fields.len) return error.InvalidVariantIndex;
     const active = wire_fields[idx];
 
-    // Check for unguarded cycles before decoding the active field.
-    if (active.type_ref >= 0 and @as(usize, @intCast(active.type_ref)) < table.len) {
-        if (hasUnguardedCycle(table, @intCast(active.type_ref))) return error.EndOfStream;
+    if (active.type_ref >= 0 and @as(usize, @intCast(active.type_ref)) < cycle_flags.len) {
+        if (cycle_flags[@intCast(active.type_ref)]) return error.EndOfStream;
     }
 
     inline for (@typeInfo(T).@"union".fields) |uf| {
-        if (active.hash == comptime fieldHash(uf.name)) {
+        if (active.hash == comptime t.fieldHash(uf.name)) {
             if (uf.type == void) {
                 if (wireOpcode(table, active.type_ref) != type_null)
                     return error.TypeMismatch;
                 return @unionInit(T, uf.name, {});
             } else {
-                return @unionInit(T, uf.name, try decodeValue(uf.type, reader, table, active.type_ref, alloc, data_len, options));
+                return @unionInit(T, uf.name, try decodeValue(uf.type, reader, table, active.type_ref, alloc, data_len, options, cycle_flags));
             }
         }
     }
@@ -952,6 +987,28 @@ fn isZeroSizedDepth(table: []const TypeEntry, ref: i32, depth: usize) bool {
         };
     }
     return ref == type_null or ref == type_reserved;
+}
+
+// Returns the length of the longest prefix of `buf` that is valid UTF-8
+// ending on a complete codepoint boundary. Trailing bytes of an incomplete
+// multi-byte sequence are excluded so they can be carried to the next chunk.
+fn validUtf8Prefix(buf: []const u8) usize {
+    if (std.unicode.utf8ValidateSlice(buf)) return buf.len;
+    // Find the last position where a valid codepoint could start.
+    // Walk backwards to find the start of the trailing incomplete sequence.
+    var i: usize = buf.len;
+    while (i > 0) {
+        i -= 1;
+        // Check if this byte is a leading byte (not a continuation 10xxxxxx).
+        if (buf[i] & 0xC0 != 0x80) {
+            // This is a leading byte. Check if buf[0..i] is valid.
+            if (i == 0) return 0;
+            if (std.unicode.utf8ValidateSlice(buf[0..i])) return i;
+            // buf[0..i] is also invalid, so there's a real encoding error.
+            return 0;
+        }
+    }
+    return 0;
 }
 
 fn skipValue(reader: anytype, table: []const TypeEntry, ref: i32) DecodeError!void {
@@ -1011,7 +1068,10 @@ fn skipValueDepth(reader: anytype, table: []const TypeEntry, ref: i32, depth: us
                 const m = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
                 const n = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
                 reader.skipBytes(m, .{}) catch return error.EndOfStream;
-                _ = n;
+                for (0..n) |_| {
+                    const ref_idx = leb.readIleb128(i32, reader) catch |e| return mapLebError(e);
+                    try skipValueDepth(reader, table, ref_idx, depth + 1);
+                }
             },
         }
         return;
@@ -1036,11 +1096,23 @@ fn skipValueDepth(reader: anytype, table: []const TypeEntry, ref: i32, depth: us
         },
         type_text => {
             const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-            if (len == 0) return;
-            const start = reader.context.pos;
-            reader.skipBytes(len, .{}) catch return error.EndOfStream;
-            const buf = reader.context.buffer[start..][0..len];
-            if (!std.unicode.utf8ValidateSlice(buf)) return error.InvalidUtf8;
+            var remaining: usize = len;
+            var carry: usize = 0;
+            var buf: [256]u8 = undefined;
+            while (remaining > 0) {
+                const to_read = @min(remaining, buf.len - carry);
+                const slice = buf[carry..][0..to_read];
+                reader.readNoEof(slice) catch return error.EndOfStream;
+                const filled = carry + to_read;
+                const valid_end = validUtf8Prefix(buf[0..filled]);
+                if (valid_end == 0 and filled >= 4) return error.InvalidUtf8;
+                carry = filled - valid_end;
+                if (carry > 0) {
+                    std.mem.copyForwards(u8, buf[0..carry], buf[valid_end..filled]);
+                }
+                remaining -= to_read;
+            }
+            if (carry > 0) return error.InvalidUtf8;
         },
         type_principal => {
             const flag = reader.readByte() catch return error.EndOfStream;
@@ -1096,18 +1168,18 @@ test "round-trip vec" {
 
 test "round-trip principal" {
     const id = [_]u8{ 0xAB, 0xCD, 0x01 };
-    const bytes = try encode(testing.allocator, .{Principal.from(&id)});
+    const bytes = try encode(testing.allocator, .{t.Principal.from(&id)});
     defer testing.allocator.free(bytes);
-    const decoded = try decode(Principal, testing.allocator, bytes);
+    const decoded = try decode(t.Principal, testing.allocator, bytes);
     defer testing.allocator.free(decoded.bytes);
     try testing.expectEqualSlices(u8, &id, decoded.bytes);
 }
 
 test "round-trip blob" {
     const data = [_]u8{ 0xFF, 0x00, 0x42 };
-    const bytes = try encode(testing.allocator, .{Blob.from(&data)});
+    const bytes = try encode(testing.allocator, .{t.Blob.from(&data)});
     defer testing.allocator.free(bytes);
-    const decoded = try decode(Blob, testing.allocator, bytes);
+    const decoded = try decode(t.Blob, testing.allocator, bytes);
     defer testing.allocator.free(decoded.data);
     try testing.expectEqualSlices(u8, &data, decoded.data);
 }
@@ -1166,7 +1238,7 @@ test "coerce null wire to opt T" {
 }
 
 test "coerce reserved wire to opt T" {
-    const bytes = try encode(testing.allocator, .{Reserved{}});
+    const bytes = try encode(testing.allocator, .{t.Reserved{}});
     defer testing.allocator.free(bytes);
     const val = try decode(?u32, testing.allocator, bytes);
     try testing.expectEqual(@as(?u32, null), val);
@@ -1232,4 +1304,65 @@ test "decode numeric-ID record into tuple" {
     const decoded = try decode(struct { u32, bool }, testing.allocator, bytes);
     try testing.expectEqual(@as(u32, 99), decoded[0]);
     try testing.expectEqual(true, decoded[1]);
+}
+
+test "decodeVec frees partial elements on error" {
+    // Encode a vec of 3 text strings, then truncate so the 3rd element
+    // fails mid-decode. The testing allocator will flag any leaked
+    // allocations from the first two successfully-decoded strings.
+    const items = [_][]const u8{ "hello", "world", "!" };
+    const bytes = try encode(testing.allocator, .{@as([]const []const u8, &items)});
+    defer testing.allocator.free(bytes);
+
+    // Truncate the last byte so the third string read hits EndOfStream.
+    const truncated = bytes[0 .. bytes.len - 1];
+    const result = decode([]const []const u8, testing.allocator, truncated);
+    try testing.expectError(error.EndOfStream, result);
+    // If partially-decoded elements were leaked, the testing allocator
+    // will fail this test at cleanup.
+}
+
+test "decodeRecord frees partial fields on error" {
+    // Encode a record with two text fields, then truncate so the second
+    // field fails mid-decode. The testing allocator will detect any leak
+    // from the first successfully-decoded field.
+    const Rec = struct { first: []const u8, second: []const u8 };
+    const bytes = try encode(testing.allocator, .{Rec{ .first = "hello", .second = "world" }});
+    defer testing.allocator.free(bytes);
+
+    const truncated = bytes[0 .. bytes.len - 1];
+    const result = decode(Rec, testing.allocator, truncated);
+    try testing.expectError(error.EndOfStream, result);
+}
+
+test "skipValue validates utf8 in text without reader internals" {
+    // Encode a record with a text field that gets skipped (wire has extra
+    // field not in the Zig type). Use a 300-byte string to exercise the
+    // chunked UTF-8 validation path (buffer is 256 bytes).
+    const long_text = "a" ** 300;
+    const Wire = struct { keep: u32, extra: []const u8 };
+    const bytes = try encode(testing.allocator, .{Wire{ .keep = 42, .extra = long_text }});
+    defer testing.allocator.free(bytes);
+
+    // Decode as a struct missing the "extra" field. The text value is
+    // skipped via skipValue which must validate UTF-8 in chunks.
+    const Small = struct { keep: u32 };
+    const decoded = try decode(Small, testing.allocator, bytes);
+    try testing.expectEqual(@as(u32, 42), decoded.keep);
+}
+
+test "Decoded deinit frees all nested allocations" {
+    const Rec = struct { name: []const u8, tags: []const []const u8 };
+    const bytes = try encode(testing.allocator, .{Rec{
+        .name = "Alice",
+        .tags = &[_][]const u8{ "admin", "user" },
+    }});
+    defer testing.allocator.free(bytes);
+
+    var result = try decodeOwned(Rec, testing.allocator, bytes);
+    defer result.deinit();
+    try testing.expectEqualStrings("Alice", result.value.name);
+    try testing.expectEqual(@as(usize, 2), result.value.tags.len);
+    try testing.expectEqualStrings("admin", result.value.tags[0]);
+    try testing.expectEqualStrings("user", result.value.tags[1]);
 }

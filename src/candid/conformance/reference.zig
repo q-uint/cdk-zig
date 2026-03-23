@@ -426,7 +426,7 @@ test "reference: service {} !<: service { foo : (text) -> (nat) }" {
         func_(&.{type_text}, &.{type_nat}), // 1: func (text) -> (nat)
         svc(&.{meth("foo", 1)}), // 2: service { foo : (text) -> (nat) }
     };
-    try testing.expect(!isSubtype(&table, 0, 2));
+    try testing.expect(!try isSubtype(&table, 0, 2, testing.allocator));
 }
 
 test "reference: service { foo query } !<: service { foo }" {
@@ -436,7 +436,7 @@ test "reference: service { foo query } !<: service { foo }" {
         func_(&.{type_text}, &.{type_nat}), // 2: func (text) -> (nat)
         svc(&.{meth("foo", 2)}), // 3: service { foo : func }
     };
-    try testing.expect(!isSubtype(&table, 1, 3));
+    try testing.expect(!try isSubtype(&table, 1, 3, testing.allocator));
 }
 
 test "reference: service { foo } !<: service { foo query }" {
@@ -446,7 +446,7 @@ test "reference: service { foo } !<: service { foo query }" {
         funcA(&.{type_text}, &.{type_nat}, 1), // 2: func (text) -> (nat) query
         svc(&.{meth("foo", 2)}), // 3: service { foo : func query }
     };
-    try testing.expect(!isSubtype(&table, 1, 3));
+    try testing.expect(!try isSubtype(&table, 1, 3, testing.allocator));
 }
 
 test "reference: service { foo } decodes at service {}" {
@@ -463,7 +463,7 @@ test "reference: func () -> () !<: func (text) -> (nat)" {
         func_(&.{}, &.{}), // 0: func () -> ()
         func_(&.{type_text}, &.{type_nat}), // 1: func (text) -> (nat)
     };
-    try testing.expect(!isSubtype(&table, 0, 1));
+    try testing.expect(!try isSubtype(&table, 0, 1, testing.allocator));
 }
 
 test "reference: func (text) -> (nat) decodes at func (text, opt text) -> ()" {
@@ -476,5 +476,5 @@ test "reference: func (text) -> (nat) decodes at func (text, opt text) -> ()" {
         .{ .opcode = type_opt, .inner = type_text }, // 1: opt text
         func_(&.{ type_text, 1 }, &.{}), // 2: func (text, opt text) -> ()
     };
-    try testing.expect(isSubtype(&table, 0, 2));
+    try testing.expect(try isSubtype(&table, 0, 2, testing.allocator));
 }

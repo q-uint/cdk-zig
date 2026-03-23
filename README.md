@@ -173,6 +173,49 @@ const MyTask = struct {
 };
 ```
 
+### Candid encoding/decoding
+
+Encode and decode Candid values with automatic type mapping:
+
+```zig
+const cdk = @import("cdk");
+const candid = cdk.candid;
+
+const Greeting = struct {
+    name: []const u8,
+    tags: []const []const u8,
+};
+
+fn greet() void {
+    const data = cdk.argData();
+
+    // Option 1: decodeOwned returns a Decoded(T) with a deinit method
+    // that recursively frees all nested allocations.
+    var result = candid.decodeOwned(Greeting, cdk.allocator, data) catch
+        @panic("decode failed");
+    defer result.deinit();
+
+    const reply = candid.encode(cdk.allocator, .{result.value}) catch
+        @panic("encode failed");
+    cdk.replyRaw(reply);
+}
+```
+
+`decodeOwned` returns a `Decoded(T)` wrapper whose `deinit()` recursively
+frees all decoder-allocated memory (slices, pointers, principals, blobs).
+
+For cases where you need direct control, use `decode` with `freeDecoded`:
+
+```zig
+const val = candid.decode(Greeting, allocator, data) catch @panic("decode failed");
+defer candid.freeDecoded(Greeting, allocator, val);
+```
+
+Supported types: `bool`, integers (`u8`-`u128`, `i8`-`i128`), floats
+(`f32`, `f64`), `[]const u8` (text), optionals, slices (vec), structs
+(record), tagged unions (variant), `Principal`, `Blob`, `Service`, and
+func types.
+
 ### Profiling
 
 Enable compile-time profiling with zero overhead when disabled:
