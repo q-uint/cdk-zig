@@ -1,6 +1,12 @@
 .{
     .name = .ic_cdk,
     .version = "0.0.0",
+    .dependencies = .{
+        .blst = .{
+            .url = "https://github.com/supranational/blst/archive/refs/tags/v0.3.16.tar.gz",
+            .hash = "N-V-__8AAN0aOwD_n2xFB-Q0eBNtvIKtGPfGZSVt0DdbmfH2",
+        },
+    },
     .fingerprint = 0x42a58e5225e5a9c0,
     .paths = .{"src"},
 }

@@ -7,6 +7,8 @@ pub const stable = @import("stable/stable.zig");
 pub const candid = @import("candid/candid.zig");
 const exp = @import("export.zig");
 
+pub const cbor = @import("cbor.zig");
+pub const hash_tree = @import("hash_tree.zig");
 pub const timers = @import("timers.zig");
 pub const executor = @import("executor.zig");
 pub const profiling = @import("profiling.zig");

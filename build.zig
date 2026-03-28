@@ -41,6 +41,7 @@ pub fn addTests(
 ) *std.Build.Step.Run {
     const cdk_mod = dep.module("cdk");
     const pic_mod = dep.module("pocket-ic");
+    const bls_mod = dep.module("bls");
     const test_mod = b.createModule(.{
         .root_source_file = b.path("test.zig"),
         .target = b.standardTargetOptions(.{}),
@@ -48,6 +49,7 @@ pub fn addTests(
         .imports = &.{
             .{ .name = "cdk", .module = cdk_mod },
             .{ .name = "pocket-ic", .module = pic_mod },
+            .{ .name = "bls", .module = bls_mod },
         },
     });
     const t = b.addTest(.{ .root_module = test_mod });
@@ -63,9 +65,26 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/cdk.zig"),
     });
 
+    const blst_dep_lib = b.dependency("blst", .{});
+    const bls_mod_lib = b.addModule("bls", .{
+        .root_source_file = b.path("src/bls.zig"),
+    });
+    bls_mod_lib.addIncludePath(blst_dep_lib.path("bindings"));
+    bls_mod_lib.addCSourceFile(.{
+        .file = blst_dep_lib.path("src/server.c"),
+        .flags = &.{ "-fno-builtin", "-Wno-unused-function" },
+    });
+    bls_mod_lib.addCSourceFile(.{
+        .file = blst_dep_lib.path("build/assembly.S"),
+        .flags = &.{},
+    });
+
     _ = b.addModule("pocket-ic", .{
         .root_source_file = b.path("src/pocket_ic.zig"),
-        .imports = &.{.{ .name = "cdk", .module = cdk_mod }},
+        .imports = &.{
+            .{ .name = "cdk", .module = cdk_mod },
+            .{ .name = "bls", .module = bls_mod_lib },
+        },
     });
 
     const target = b.standardTargetOptions(.{});
@@ -78,6 +97,8 @@ pub fn build(b: *std.Build) void {
         "src/pocket_ic.zig",
         "src/stable/stable.zig",
         "src/candid/candid.zig",
+        "src/cbor.zig",
+        "src/hash_tree.zig",
     };
     for (test_files) |file| {
         const mod = b.createModule(.{
@@ -90,6 +111,28 @@ pub fn build(b: *std.Build) void {
         }
         const t = b.addTest(.{ .root_module = mod });
         test_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
+    // BLS tests require linking blst C library (native only).
+    const blst_dep = b.dependency("blst", .{});
+    {
+        const bls_mod = b.createModule(.{
+            .root_source_file = b.path("src/bls.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        bls_mod.addIncludePath(blst_dep.path("bindings"));
+        bls_mod.addCSourceFile(.{
+            .file = blst_dep.path("src/server.c"),
+            .flags = &.{ "-fno-builtin", "-Wno-unused-function" },
+        });
+        bls_mod.addCSourceFile(.{
+            .file = blst_dep.path("build/assembly.S"),
+            .flags = &.{},
+        });
+        bls_mod.linkSystemLibrary("c", .{});
+        const bls_test = b.addTest(.{ .root_module = bls_mod });
+        test_step.dependOn(&b.addRunArtifact(bls_test).step);
     }
 
     // Compile-check the CDK for both wasm32 and wasm64 targets.

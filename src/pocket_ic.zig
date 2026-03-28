@@ -1,8 +1,11 @@
 const std = @import("std");
 const cdk = @import("cdk");
+pub const bls = @import("bls");
 pub const principal = cdk.principal;
 pub const flamegraph = @import("flamegraph.zig");
 const candid = cdk.candid;
+const cbor = cdk.cbor;
+const hash_tree = cdk.hash_tree;
 
 const Allocator = std.mem.Allocator;
 const Stringify = std.json.Stringify;
@@ -442,6 +445,240 @@ pub const PocketIc = struct {
         return parseCanisterResult(self.allocator, await_resp.body);
     }
 
+    pub const Certificate = struct {
+        allocator: Allocator,
+        tree: hash_tree.CborTree,
+        signature: []const u8,
+        // Owns the backing bytes that tree nodes and signature point into.
+        backing: []const u8,
+
+        pub fn deinit(self: *Certificate) void {
+            self.tree.deinit();
+            self.allocator.free(self.backing);
+        }
+    };
+
+    pub fn readStateCertificate(
+        self: *PocketIc,
+        canister_id: []const u8,
+        paths: []const []const []const u8,
+    ) !Certificate {
+        // Build the CBOR read_state request envelope.
+        const time_ns = try self.getTime();
+        const ingress_expiry = time_ns + 240_000_000_000;
+
+        // Encode each path as CBOR: array of byte strings.
+        // Then wrap in an outer array.
+        var path_bufs: [8][]const u8 = undefined;
+        if (paths.len > 8) return error.TooManyPaths;
+        for (paths, 0..) |path, i| {
+            path_bufs[i] = try encodePathCbor(self.allocator, path);
+        }
+        defer for (path_bufs[0..paths.len]) |buf| self.allocator.free(buf);
+
+        // Compute content size for dynamic allocation.
+        var paths_size: usize = 0;
+        for (path_bufs[0..paths.len]) |encoded_path| {
+            paths_size += encoded_path.len;
+        }
+        const content_size = 1 // map(4) header
+            + cbor.headSize("request_type".len) + "request_type".len + cbor.headSize("read_state".len) + "read_state".len + cbor.headSize("ingress_expiry".len) + "ingress_expiry".len + cbor.headSize(ingress_expiry) + cbor.headSize("paths".len) + "paths".len + cbor.headSize(paths.len) + paths_size + cbor.headSize("sender".len) + "sender".len + cbor.headSize(1) + 1; // bytes(0x04)
+
+        // envelope: map(1) + "content" header + content
+        const envelope_size = 1 + cbor.headSize("content".len) + "content".len + content_size;
+        // tagged: 3-byte self-describe tag + envelope
+        const tagged_size = 3 + envelope_size;
+
+        const tagged_buf = try self.allocator.alloc(u8, tagged_size);
+        defer self.allocator.free(tagged_buf);
+
+        // Write self-describe tag.
+        tagged_buf[0] = 0xd9;
+        tagged_buf[1] = 0xd9;
+        tagged_buf[2] = 0xf7;
+
+        // Write envelope: { "content": <content> }
+        var pos: usize = 3;
+        tagged_buf[pos] = 0xa1; // map(1)
+        pos += 1;
+        pos += writeTextToBuf(tagged_buf[pos..], "content");
+
+        // Write content map.
+        tagged_buf[pos] = 0xa4; // map(4)
+        pos += 1;
+        pos += writeTextToBuf(tagged_buf[pos..], "request_type");
+        pos += writeTextToBuf(tagged_buf[pos..], "read_state");
+        pos += writeTextToBuf(tagged_buf[pos..], "ingress_expiry");
+        pos += writeUintToBuf(tagged_buf[pos..], ingress_expiry);
+        pos += writeTextToBuf(tagged_buf[pos..], "paths");
+        pos += writeArrayHeaderToBuf(tagged_buf[pos..], paths.len);
+        for (path_bufs[0..paths.len]) |encoded_path| {
+            @memcpy(tagged_buf[pos..][0..encoded_path.len], encoded_path);
+            pos += encoded_path.len;
+        }
+        pos += writeTextToBuf(tagged_buf[pos..], "sender");
+        pos += writeBytesToBuf(tagged_buf[pos..], &.{0x04});
+
+        const tagged = tagged_buf[0..pos];
+
+        // POST to read_state endpoint.
+        const cid_text = principal.encode(canister_id);
+        const url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/instances/{d}/api/v2/canister/{s}/read_state",
+            .{ self.url, self.instance_id, cid_text },
+        );
+        defer self.allocator.free(url);
+
+        const resp = try httpRequestCbor(self.client, self.allocator, url, tagged);
+        errdefer self.allocator.free(resp.body);
+
+        if (resp.status != .ok) {
+            self.allocator.free(resp.body);
+            return error.InvalidReadStateResponse;
+        }
+
+        // Parse response: CBOR { "certificate": <bytes> }
+        var resp_data = resp.body;
+        if (resp_data.len >= 3 and resp_data[0] == 0xd9 and resp_data[1] == 0xd9 and resp_data[2] == 0xf7) {
+            resp_data = resp_data[3..];
+        }
+        const resp_decoded = try cbor.decodeValue(resp_data);
+        const resp_map = switch (resp_decoded.value) {
+            .map => |m| m,
+            else => return error.InvalidReadStateResponse,
+        };
+        const cert_val = try cbor.mapLookup(resp_map, "certificate") orelse
+            return error.InvalidReadStateResponse;
+        const cert_bytes = switch (cert_val) {
+            .bytes => |b| b,
+            else => return error.InvalidReadStateResponse,
+        };
+
+        // Parse certificate: CBOR { "tree": <tree>, "signature": <bytes> }
+        var cert_data = cert_bytes;
+        if (cert_data.len >= 3 and cert_data[0] == 0xd9 and cert_data[1] == 0xd9 and cert_data[2] == 0xf7) {
+            cert_data = cert_data[3..];
+        }
+        const cert_decoded = try cbor.decodeValue(cert_data);
+        const cert_map = switch (cert_decoded.value) {
+            .map => |m| m,
+            else => return error.InvalidReadStateResponse,
+        };
+
+        const sig_val = try cbor.mapLookup(cert_map, "signature") orelse
+            return error.InvalidReadStateResponse;
+        const signature = switch (sig_val) {
+            .bytes => |b| b,
+            else => return error.InvalidReadStateResponse,
+        };
+
+        const tree_raw = try findRawTreeBytes(cert_map);
+        var tree = try hash_tree.HashTree.decodeCbor(self.allocator, tree_raw);
+        errdefer tree.deinit();
+
+        return .{
+            .allocator = self.allocator,
+            .tree = tree,
+            .signature = signature,
+            .backing = resp.body,
+        };
+    }
+
+    fn findRawTreeBytes(map_content: []const u8) ![]const u8 {
+        return try cbor.mapLookupRaw(map_content, "tree") orelse error.InvalidCbor;
+    }
+
+    // Get the root public key for this IC instance.
+    // Returns the raw BLS12-381 G2 public key (96 bytes) without DER prefix.
+    pub fn rootKey(self: *PocketIc) ![]const u8 {
+        // Look up the subnet for the effective_canister_id, then fetch
+        // that subnet's public key via read/pub_key.
+
+        const subnet_b64 = try base64Encode(self.allocator, self.effective_canister_id);
+        defer self.allocator.free(subnet_b64);
+
+        // First get the subnet_id for our effective canister.
+        const get_subnet_body = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"canister_id\":\"{s}\"}}",
+            .{subnet_b64},
+        );
+        defer self.allocator.free(get_subnet_body);
+
+        const get_subnet_url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/instances/{d}/read/get_subnet",
+            .{ self.url, self.instance_id },
+        );
+        defer self.allocator.free(get_subnet_url);
+
+        const subnet_resp = try httpPost(self.client, self.allocator, get_subnet_url, get_subnet_body);
+        defer self.allocator.free(subnet_resp.body);
+
+        const subnet_parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, subnet_resp.body, .{
+            .allocate = .alloc_always,
+        });
+        defer subnet_parsed.deinit();
+
+        const subnet_id_b64 = subnet_parsed.value.object.get("subnet_id").?.string;
+        const subnet_id = try base64Decode(self.allocator, subnet_id_b64);
+        defer self.allocator.free(subnet_id);
+
+        // Now get the public key.
+        const sid_b64 = try base64Encode(self.allocator, subnet_id);
+        defer self.allocator.free(sid_b64);
+
+        const pk_body = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"subnet_id\":\"{s}\"}}",
+            .{sid_b64},
+        );
+        defer self.allocator.free(pk_body);
+
+        const pk_url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/instances/{d}/read/pub_key",
+            .{ self.url, self.instance_id },
+        );
+        defer self.allocator.free(pk_url);
+
+        const pk_resp = try httpPost(self.client, self.allocator, pk_url, pk_body);
+        defer self.allocator.free(pk_resp.body);
+
+        // Response is a JSON-encoded byte array (base64 or raw JSON array).
+        const pk_parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, pk_resp.body, .{
+            .allocate = .alloc_always,
+        });
+        defer pk_parsed.deinit();
+
+        // The response is a DER-encoded public key as a JSON array of bytes.
+        const arr = pk_parsed.value.array;
+        const der_key = try self.allocator.alloc(u8, arr.items.len);
+        for (arr.items, 0..) |item, i| {
+            der_key[i] = @intCast(item.integer);
+        }
+
+        // Strip DER prefix to get raw 96-byte BLS key.
+        const raw_key = bls.extractDerKey(der_key) catch {
+            // If DER extraction fails, return as-is (might already be raw).
+            return der_key;
+        };
+        const result = try self.allocator.dupe(u8, raw_key);
+        self.allocator.free(der_key);
+        return result;
+    }
+
+    // Verify a certificate's BLS signature against the IC root key.
+    pub fn verifyCertificate(self: *PocketIc, cert: *const Certificate) !void {
+        const root_key = try self.rootKey();
+        defer self.allocator.free(root_key);
+
+        const root_hash = cert.tree.root.?.reconstruct();
+        bls.verifyIcCertificate(cert.signature, &root_hash, root_key) catch
+            return error.CertificateVerificationFailed;
+    }
+
     fn requestAndPoll(
         self: *PocketIc,
         method: std.http.Method,
@@ -510,6 +747,73 @@ fn httpGet(client: *std.http.Client, allocator: Allocator, url: []const u8) !Htt
 
 fn httpDelete(client: *std.http.Client, allocator: Allocator, url: []const u8) !HttpResponse {
     return httpRequest(client, allocator, .DELETE, url, null);
+}
+
+fn httpRequestCbor(
+    client: *std.http.Client,
+    allocator: Allocator,
+    url: []const u8,
+    body: []const u8,
+) !HttpResponse {
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.POST, uri, .{
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "application/cbor" },
+        },
+    });
+    defer req.deinit();
+    // std.http.Client.sendBodyComplete takes []u8 but does not mutate;
+    // @constCast is safe here.
+    try req.sendBodyComplete(@constCast(body));
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buf);
+    var transfer_buf: [16 * 1024]u8 = undefined;
+    const reader = response.reader(&transfer_buf);
+    const response_body = try reader.allocRemaining(allocator, std.Io.Limit.limited(10 * 1024 * 1024));
+    return .{ .status = response.head.status, .body = response_body };
+}
+
+fn encodePathCbor(allocator: Allocator, path: []const []const u8) ![]const u8 {
+    // Calculate size: array header + each element as a CBOR byte string.
+    var size: usize = cbor.headSize(path.len);
+    for (path) |elem| {
+        size += cbor.headSize(elem.len) + elem.len;
+    }
+    const buf = try allocator.alloc(u8, size);
+    var pos: usize = 0;
+    cbor.writeHead(buf, &pos, 4, path.len); // CBOR array
+    for (path) |elem| {
+        cbor.writeHead(buf, &pos, 2, elem.len); // CBOR byte string
+        @memcpy(buf[pos..][0..elem.len], elem);
+        pos += elem.len;
+    }
+    return buf;
+}
+
+fn writeTextToBuf(buf: []u8, text: []const u8) usize {
+    var pos: usize = 0;
+    cbor.writeHead(buf, &pos, 3, text.len);
+    @memcpy(buf[pos..][0..text.len], text);
+    return pos + text.len;
+}
+
+fn writeBytesToBuf(buf: []u8, data: []const u8) usize {
+    var pos: usize = 0;
+    cbor.writeHead(buf, &pos, 2, data.len);
+    @memcpy(buf[pos..][0..data.len], data);
+    return pos + data.len;
+}
+
+fn writeUintToBuf(buf: []u8, val: u64) usize {
+    var pos: usize = 0;
+    cbor.writeHead(buf, &pos, 0, val);
+    return pos;
+}
+
+fn writeArrayHeaderToBuf(buf: []u8, len: usize) usize {
+    var pos: usize = 0;
+    cbor.writeHead(buf, &pos, 4, len);
+    return pos;
 }
 
 fn httpRequest(

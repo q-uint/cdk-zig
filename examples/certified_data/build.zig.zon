@@ -1,0 +1,14 @@
+.{
+    .name = .certified_data,
+    .version = "0.0.0",
+    .fingerprint = 0x561b20d4e31aaa1,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "certified_data.zig",
+        "test.zig",
+    },
+}
