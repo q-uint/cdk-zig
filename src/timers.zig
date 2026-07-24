@@ -42,7 +42,7 @@ pub fn processTimers() void {
     const now: u64 = @intCast(ic0.time());
 
     // Collect expired timer IDs to avoid modifying the map during iteration.
-    var expired = std.ArrayListUnmanaged(TimerId){};
+    var expired: std.ArrayListUnmanaged(TimerId) = .empty;
     defer expired.deinit(allocator);
 
     for (map.keys(), map.values()) |id, t| {

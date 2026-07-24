@@ -4,19 +4,24 @@ const candid = @import("cdk").candid;
 
 const allocator = std.testing.allocator;
 
+fn initPic() !pic.PocketIc {
+    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
+    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
+}
+
 const Greeting = struct {
     greeting: []const u8,
 };
 
 fn readWasm(name: []const u8) ![]const u8 {
-    return std.fs.cwd().readFileAlloc(allocator, name, 10 * 1024 * 1024);
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, name, allocator, .limited(10 * 1024 * 1024));
 }
 
 test "callee greet" {
     const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
     defer allocator.free(callee_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();
@@ -48,7 +53,7 @@ test "caller calls callee" {
     const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
     defer allocator.free(caller_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();

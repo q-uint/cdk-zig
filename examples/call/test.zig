@@ -3,8 +3,13 @@ const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
 
+fn initPic() !pic.PocketIc {
+    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
+    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
+}
+
 fn readWasm(name: []const u8) ![]const u8 {
-    return std.fs.cwd().readFileAlloc(allocator, name, 10 * 1024 * 1024);
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, name, allocator, .limited(10 * 1024 * 1024));
 }
 
 fn expectReply(result: pic.WasmResult, expected: []const u8) !void {
@@ -34,12 +39,12 @@ fn expectReject(result: pic.WasmResult) ![]const u8 {
 }
 
 test "instance lifecycle" {
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     pocket.deinit();
 }
 
 test "create canister" {
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -48,7 +53,7 @@ test "create canister" {
 }
 
 test "time control" {
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const t1 = try pocket.getTime();
@@ -66,7 +71,7 @@ test "time control" {
 }
 
 test "tick" {
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     try pocket.tick();
@@ -76,7 +81,7 @@ test "callee greet" {
     const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
     defer allocator.free(callee_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();
@@ -91,7 +96,7 @@ test "caller greet" {
     const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
     defer allocator.free(caller_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const caller_id = try pocket.createCanister();
@@ -108,7 +113,7 @@ test "caller calls callee" {
     const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
     defer allocator.free(caller_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();
@@ -128,7 +133,7 @@ test "query non-existent method returns reject" {
     const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
     defer allocator.free(callee_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -145,7 +150,7 @@ test "update non-existent method returns reject" {
     const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
     defer allocator.free(callee_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -162,7 +167,7 @@ test "caller without callee principal traps on call_greet" {
     const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
     defer allocator.free(caller_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const caller_id = try pocket.createCanister();
@@ -180,7 +185,7 @@ test "caller calls non-existent canister" {
     const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
     defer allocator.free(caller_wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     // Use a bogus canister ID as the callee.

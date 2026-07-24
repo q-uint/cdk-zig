@@ -40,23 +40,23 @@
       pocketIcSrc =
         if system == "x86_64-linux" then
           {
-            url = "https://github.com/dfinity/pocketic/releases/download/12.0.0/pocket-ic-x86_64-linux.gz";
-            sha256 = "1b25vf5vvpz07b7wyw59jda1lxr7b4zv8gwhsln41a785yhmnh4i";
+            url = "https://github.com/dfinity/pocketic/releases/download/15.0.0/pocket-ic-x86_64-linux.gz";
+            sha256 = "0f5hh94xsnfkh6nbh4prdrklq14sdzni8m2vn13g1l5xfllmjbcp";
           }
         else if system == "aarch64-linux" then
           {
-            url = "https://github.com/dfinity/pocketic/releases/download/12.0.0/pocket-ic-arm64-linux.gz";
-            sha256 = "058bwjaqf9la037g72lfx0gw6g4ljcri9c209x70hihiw95aqb2x";
+            url = "https://github.com/dfinity/pocketic/releases/download/15.0.0/pocket-ic-arm64-linux.gz";
+            sha256 = "1nxjnsqwmncph9qbhsabag08f9s20hjdgs7dd3ariq9n81whvl0r";
           }
         else if system == "x86_64-darwin" then
           {
-            url = "https://github.com/dfinity/pocketic/releases/download/12.0.0/pocket-ic-x86_64-darwin.gz";
-            sha256 = "0dcyh74c696lqjnlh1bzjh8x0xqgsvcqivqlbs9sifmgqipsbfk7";
+            url = "https://github.com/dfinity/pocketic/releases/download/15.0.0/pocket-ic-x86_64-darwin.gz";
+            sha256 = "0wlz7zbi3w8rbjwhlnkk45b7mhlhlpkyc21dbbi8r3lcq03kl4qx";
           }
         else if system == "aarch64-darwin" then
           {
-            url = "https://github.com/dfinity/pocketic/releases/download/12.0.0/pocket-ic-arm64-darwin.gz";
-            sha256 = "0wsqb6575ydq8190h4z11r8ssgbm1smvc7n0scyl05j5zrcqbmab";
+            url = "https://github.com/dfinity/pocketic/releases/download/15.0.0/pocket-ic-arm64-darwin.gz";
+            sha256 = "03parxzqgisb941lqw5v2rcvfcp128jmczw724a0jjcraps6vag6";
           }
         else
           { };
@@ -103,7 +103,7 @@
           pocket-ic-server
 
           # zig
-          zig-overlay.packages.${system}."0.15.2"
+          zig-overlay.packages.${system}."0.16.0"
           zls
 
           # profiling

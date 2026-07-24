@@ -9,7 +9,14 @@ const hash_tree = cdk.hash_tree;
 
 const Allocator = std.mem.Allocator;
 const Stringify = std.json.Stringify;
-const IoWriter = std.io.Writer;
+const IoWriter = std.Io.Writer;
+
+var port_file_seq: std.atomic.Value(u64) = .init(0);
+
+fn portFilePath(allocator: Allocator) ![]const u8 {
+    const seq = port_file_seq.fetchAdd(1, .monotonic);
+    return std.fmt.allocPrint(allocator, "/tmp/pocket_ic_{d}_{d}.port", .{ std.Thread.getCurrentId(), seq });
+}
 
 pub const SubnetKind = enum {
     application,
@@ -35,6 +42,10 @@ pub const WasmResult = union(enum) {
 
 pub const PocketIcConfig = struct {
     server_url: ?[]const u8 = null,
+    // Path to the pocket-ic server binary. Required unless server_url is set.
+    // The caller reads this from the environment (e.g. POCKET_IC_BIN); the
+    // library does not access the process environment itself.
+    bin_path: ?[]const u8 = null,
     application_subnets: u32 = 1,
     nns: bool = false,
     system_subnets: u32 = 0,
@@ -47,19 +58,21 @@ pub const PocketIc = struct {
     effective_canister_id: []const u8,
     client: *std.http.Client,
     process: ?std.process.Child = null,
+    io: std.Io,
 
-    pub fn init(allocator: Allocator, config: PocketIcConfig) !PocketIc {
+    pub fn init(io: std.Io, allocator: Allocator, config: PocketIcConfig) !PocketIc {
         var process: ?std.process.Child = null;
         const url = if (config.server_url) |u|
             try allocator.dupe(u8, u)
         else blk: {
-            const result = try startServer(allocator);
+            const bin_path = config.bin_path orelse return error.PocketIcBinNotSet;
+            const result = try startServer(allocator, io, bin_path);
             process = result.process;
             break :blk result.url;
         };
 
         const client = try allocator.create(std.http.Client);
-        client.* = .{ .allocator = allocator };
+        client.* = .{ .allocator = allocator, .io = io };
 
         const instance_json = try buildInstanceConfigJson(allocator, config);
         defer allocator.free(instance_json);
@@ -96,6 +109,7 @@ pub const PocketIc = struct {
             .effective_canister_id = eff_cid,
             .client = client,
             .process = process,
+            .io = io,
         };
     }
 
@@ -116,10 +130,7 @@ pub const PocketIc = struct {
         self.allocator.free(self.effective_canister_id);
         self.allocator.free(self.url);
 
-        if (self.process) |*proc| {
-            _ = proc.kill() catch {};
-            _ = proc.wait() catch {};
-        }
+        if (self.process) |*proc| proc.kill(self.io);
     }
 
     pub fn createCanister(self: *PocketIc) ![]const u8 {
@@ -707,7 +718,7 @@ pub const PocketIc = struct {
         defer self.allocator.free(poll_url);
 
         for (0..3000) |_| {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            std.Io.sleep(self.io, .fromMilliseconds(10), .awake) catch {};
             resp = try httpGet(self.client, self.allocator, poll_url);
             if (resp.status == .ok) break;
             self.allocator.free(resp.body);
@@ -856,33 +867,27 @@ const ServerInfo = struct {
     process: std.process.Child,
 };
 
-fn startServer(allocator: Allocator) !ServerInfo {
-    const bin_path = std.posix.getenv("POCKET_IC_BIN") orelse
-        return error.PocketIcBinNotSet;
-
-    const port_file = try std.fmt.allocPrint(
-        allocator,
-        "/tmp/pocket_ic_{d}.port",
-        .{std.time.nanoTimestamp()},
-    );
+fn startServer(allocator: Allocator, io: std.Io, bin_path: []const u8) !ServerInfo {
+    const port_file = try portFilePath(allocator);
     defer allocator.free(port_file);
+    defer std.Io.Dir.deleteFileAbsolute(io, port_file) catch {};
 
     const argv = [_][]const u8{ bin_path, "--port-file", port_file };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
+    const child = try std.process.spawn(io, .{
+        .argv = &argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
 
     var port: ?u16 = null;
     for (0..300) |_| {
-        std.Thread.sleep(100 * std.time.ns_per_ms);
-        if (std.fs.openFileAbsolute(port_file, .{})) |file| {
-            defer file.close();
+        std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
+        if (std.Io.Dir.openFileAbsolute(io, port_file, .{})) |file| {
+            defer file.close(io);
             var buf: [16]u8 = undefined;
-            const n = file.readAll(&buf) catch continue;
+            const n = file.readPositionalAll(io, &buf, 0) catch continue;
             if (n > 0) {
-                const trimmed = std.mem.trimRight(u8, buf[0..n], &.{ '\n', '\r', ' ' });
+                const trimmed = std.mem.trimEnd(u8, buf[0..n], &.{ '\n', '\r', ' ' });
                 port = std.fmt.parseInt(u16, trimmed, 10) catch continue;
                 break;
             }
@@ -905,7 +910,7 @@ const subnet_entry = .{
     .state_config = "New",
     .instruction_config = "Production",
     .dts_flag = "Disabled",
-    .subnet_admins = [0][]const u8{},
+    .subnet_admins = @as(?[]const []const u8, null),
     .cost_schedule = "Normal",
 };
 
@@ -1301,36 +1306,52 @@ const test_canister_wasm = [_]u8{
     'l',  'l',  'o',
 };
 
-fn skipIfNoServer() !void {
-    if (std.posix.getenv("POCKET_IC_BIN") == null) return error.SkipZigTest;
+const TestServer = struct {
+    pic: PocketIc,
+
+    fn init(config: PocketIcConfig) !TestServer {
+        const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
+        var cfg = config;
+        cfg.bin_path = bin;
+        return .{ .pic = try PocketIc.init(std.testing.io, testing.allocator, cfg) };
+    }
+
+    fn deinit(self: *TestServer) void {
+        self.pic.deinit();
+    }
+};
+
+test "portFilePath is unique across calls" {
+    const a = try portFilePath(testing.allocator);
+    defer testing.allocator.free(a);
+    const b = try portFilePath(testing.allocator);
+    defer testing.allocator.free(b);
+    try testing.expect(!std.mem.eql(u8, a, b));
 }
 
 test "server: instance lifecycle" {
-    try skipIfNoServer();
-    var pocket = try PocketIc.init(testing.allocator, .{});
-    pocket.deinit();
+    var ts = try TestServer.init(.{});
+    ts.deinit();
 }
 
 test "server: create canister" {
-    try skipIfNoServer();
-    var pocket = try PocketIc.init(testing.allocator, .{});
-    defer pocket.deinit();
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
 
-    const cid = try pocket.createCanister();
+    const cid = try ts.pic.createCanister();
     defer testing.allocator.free(cid);
     try testing.expect(cid.len > 0);
 }
 
 test "server: install code and query" {
-    try skipIfNoServer();
-    var pocket = try PocketIc.init(testing.allocator, .{});
-    defer pocket.deinit();
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
 
-    const cid = try pocket.createCanister();
+    const cid = try ts.pic.createCanister();
     defer testing.allocator.free(cid);
-    try pocket.installCode(cid, &test_canister_wasm, "", .install);
+    try ts.pic.installCode(cid, &test_canister_wasm, "", .install);
 
-    const result = try pocket.queryCall(cid, principal.anonymous, "greet", "");
+    const result = try ts.pic.queryCall(cid, principal.anonymous, "greet", "");
     switch (result) {
         .reply => |data| {
             defer testing.allocator.free(data);
@@ -1345,55 +1366,49 @@ test "server: install code and query" {
 }
 
 test "server: time control" {
-    try skipIfNoServer();
-    var pocket = try PocketIc.init(testing.allocator, .{});
-    defer pocket.deinit();
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
 
-    const t1 = try pocket.getTime();
+    const t1 = try ts.pic.getTime();
     try testing.expect(t1 > 0);
 
     const target: u64 = 1_000_000_000_000_000_000;
-    try pocket.setTime(target);
-    const t2 = try pocket.getTime();
+    try ts.pic.setTime(target);
+    const t2 = try ts.pic.getTime();
     // setTime is async and may trigger ticks that adjust the time
     try testing.expect(t2 >= target);
 
     const advance_ns: u64 = 5_000_000_000;
-    try pocket.advanceTime(advance_ns);
-    const t3 = try pocket.getTime();
+    try ts.pic.advanceTime(advance_ns);
+    const t3 = try ts.pic.getTime();
     try testing.expect(t3 >= t2 + advance_ns);
 }
 
 test "server: tick" {
-    try skipIfNoServer();
-    var pocket = try PocketIc.init(testing.allocator, .{});
-    defer pocket.deinit();
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
 
-    try pocket.tick();
+    try ts.pic.tick();
 }
 
 test "server: add and get cycles" {
-    try skipIfNoServer();
-    var pocket = try PocketIc.init(testing.allocator, .{});
-    defer pocket.deinit();
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
 
-    const cid = try pocket.createCanister();
+    const cid = try ts.pic.createCanister();
     defer testing.allocator.free(cid);
-    const added = try pocket.addCycles(cid, 1_000_000_000_000);
+    const added = try ts.pic.addCycles(cid, 1_000_000_000_000);
     try testing.expect(added > 0);
 
-    const balance = try pocket.getCycles(cid);
+    const balance = try ts.pic.getCycles(cid);
     try testing.expect(balance > 0);
 }
 
 test "server: multiple subnets" {
-    try skipIfNoServer();
-    var pocket = try PocketIc.init(testing.allocator, .{
-        .application_subnets = 2,
-    });
-    defer pocket.deinit();
+    var ts = try TestServer.init(.{ .application_subnets = 2 });
+    defer ts.deinit();
 
-    const cid = try pocket.createCanister();
+    const cid = try ts.pic.createCanister();
     defer testing.allocator.free(cid);
     try testing.expect(cid.len > 0);
 }

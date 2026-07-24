@@ -3,8 +3,13 @@ const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
 
+fn initPic() !pic.PocketIc {
+    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
+    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
+}
+
 fn readWasm(name: []const u8) ![]const u8 {
-    return std.fs.cwd().readFileAlloc(allocator, name, 10 * 1024 * 1024);
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, name, allocator, .limited(10 * 1024 * 1024));
 }
 
 fn callUpdate(pocket: *pic.PocketIc, cid: []const u8, method: []const u8) !void {
@@ -32,7 +37,7 @@ test "profiling trace produces folded stacks" {
     const wasm = try readWasm("zig-out/bin/profiling.wasm");
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try deployAndTrace(&pocket, wasm);
@@ -54,14 +59,14 @@ test "profiling trace produces folded stacks" {
     }
     try std.testing.expect(found_compute);
 
-    try trace.writeFoldedStacks("profile.folded");
+    try trace.writeFoldedStacks(std.testing.io, "profile.folded");
 }
 
 test "stable memory flamegraph tracks page growth" {
     const wasm = try readWasm("zig-out/bin/profiling.wasm");
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try deployAndTrace(&pocket, wasm);
@@ -82,14 +87,14 @@ test "stable memory flamegraph tracks page growth" {
     }
     try std.testing.expect(found_persist);
 
-    try trace.writeFoldedStacks("stable.folded");
+    try trace.writeFoldedStacks(std.testing.io, "stable.folded");
 }
 
 test "heap memory flamegraph" {
     const wasm = try readWasm("zig-out/bin/profiling.wasm");
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try deployAndTrace(&pocket, wasm);
@@ -98,14 +103,14 @@ test "heap memory flamegraph" {
     var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .heap_bytes);
     defer trace.deinit();
 
-    try trace.writeFoldedStacks("heap.folded");
+    try trace.writeFoldedStacks(std.testing.io, "heap.folded");
 }
 
 test "__get_cycles returns instruction count" {
     const wasm = try readWasm("zig-out/bin/profiling.wasm");
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -131,7 +136,7 @@ test "tracing disabled by default produces empty trace" {
     const wasm = try readWasm("zig-out/bin/profiling.wasm");
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();

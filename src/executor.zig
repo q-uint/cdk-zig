@@ -21,7 +21,7 @@ const ErasedTask = struct {
 
 var next_id: TaskId = 0;
 var tasks: std.AutoArrayHashMapUnmanaged(TaskId, ErasedTask) = .{};
-var wakeups: std.ArrayListUnmanaged(TaskId) = .{};
+var wakeups: std.ArrayListUnmanaged(TaskId) = .empty;
 var polling: bool = false;
 
 // Spawn a task from a heap-allocated pointer.

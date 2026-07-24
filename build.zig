@@ -155,13 +155,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(wasm_check_step);
 
     const e2e_step = b.step("e2e", "Run e2e tests for all examples");
-    var examples_dir = std.fs.openDirAbsolute(
-        b.pathFromRoot("examples"),
+    const io = b.graph.io;
+    var examples_dir = b.build_root.handle.openDir(
+        io,
+        "examples",
         .{ .iterate = true },
     ) catch return;
-    defer examples_dir.close();
+    defer examples_dir.close(io);
     var it = examples_dir.iterate();
-    while (it.next() catch return) |entry| {
+    while (it.next(io) catch return) |entry| {
         if (entry.kind != .directory) continue;
         const dir = b.fmt("examples/{s}", .{entry.name});
         const run = b.addSystemCommand(&.{ "zig", "build", "test" });

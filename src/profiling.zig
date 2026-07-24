@@ -85,7 +85,7 @@ const entry_size = @sizeOf(TraceEntry);
 const page_size: usize = 2 * 1024 * 1024;
 const entries_per_page = page_size / entry_size;
 
-var entries: std.ArrayListUnmanaged(TraceEntry) = .{};
+var entries: std.ArrayListUnmanaged(TraceEntry) = .empty;
 var name_map: std.AutoArrayHashMapUnmanaged(i32, []const u8) = .{};
 var tracing_enabled: bool = false;
 var entry_mode: bool = false;

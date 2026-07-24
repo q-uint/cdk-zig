@@ -1,5 +1,4 @@
 const std = @import("std");
-const leb = std.leb;
 const Allocator = std.mem.Allocator;
 const t = @import("types.zig");
 
@@ -166,15 +165,15 @@ pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const 
 
     const fields = info.@"struct".fields;
 
-    var fbs = std.io.fixedBufferStream(data);
-    const reader = fbs.reader();
+    var fbs = std.Io.Reader.fixed(data);
+    const reader = &fbs;
 
     var magic_buf: [4]u8 = undefined;
-    reader.readNoEof(&magic_buf) catch return error.InvalidMagic;
+    reader.readSliceAll(&magic_buf) catch return error.InvalidMagic;
     if (!std.mem.eql(u8, &magic_buf, "DIDL")) return error.InvalidMagic;
 
-    const type_count = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-    const remaining = data.len - fbs.pos;
+    const type_count = reader.takeLeb128(u32) catch |e| return mapLebError(e);
+    const remaining = data.len - fbs.seek;
     if (type_count > remaining) return error.EndOfStream;
     const type_table = alloc.alloc(TypeEntry, type_count) catch return error.OutOfMemory;
     @memset(type_table, TypeEntry{});
@@ -252,7 +251,7 @@ pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const 
     };
     defer if (type_count > 0) alloc.free(cycle_flags);
 
-    const arg_count = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+    const arg_count = reader.takeLeb128(u32) catch |e| return mapLebError(e);
 
     var ref_buf: [0]i32 = .{};
     const all_refs = if (arg_count > 0)
@@ -261,7 +260,7 @@ pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const 
         @as([]i32, &ref_buf);
     defer if (arg_count > 0) alloc.free(all_refs);
     for (all_refs) |*r| {
-        r.* = leb.readIleb128(i32, reader) catch |e| return mapLebError(e);
+        r.* = reader.takeLeb128(i32) catch |e| return mapLebError(e);
     }
 
     const readable = @min(arg_count, fields.len);
@@ -284,7 +283,7 @@ pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const 
     }
 
     // Reject trailing bytes after all args are consumed
-    if (fbs.pos != data.len) {
+    if (fbs.seek != data.len) {
         inline for (fields) |field| {
             freeDecoded(field.type, alloc, @field(result, field.name));
         }
@@ -355,7 +354,7 @@ fn isValidRef(ref: i32, table_len: u32) bool {
 }
 
 fn parseTypeEntry(reader: anytype, alloc: Allocator, data_len: usize) !TypeEntry {
-    const opcode = try leb.readIleb128(i32, reader);
+    const opcode = try reader.takeLeb128(i32);
     // Only compound type constructors are valid in the type table:
     // opt(-18), vec(-19), record(-20), variant(-21), func(-22), service(-23),
     // and future types (< -24). Reject primitives (-17..-1), principal (-24),
@@ -364,42 +363,42 @@ fn parseTypeEntry(reader: anytype, alloc: Allocator, data_len: usize) !TypeEntry
         return error.UnsupportedType;
     switch (opcode) {
         type_opt, type_vec => {
-            return .{ .opcode = opcode, .inner = try leb.readIleb128(i32, reader) };
+            return .{ .opcode = opcode, .inner = try reader.takeLeb128(i32) };
         },
         type_record, type_variant => {
-            const n = try leb.readUleb128(u32, reader);
+            const n = try reader.takeLeb128(u32);
             // Each field needs at least 2 bytes (hash LEB + type_ref LEB)
             if (n > data_len / 2) return error.EndOfStream;
             const fields = try alloc.alloc(FieldEntry, n);
             errdefer alloc.free(fields);
             for (fields) |*f| {
-                f.hash = try leb.readUleb128(u32, reader);
-                f.type_ref = try leb.readIleb128(i32, reader);
+                f.hash = try reader.takeLeb128(u32);
+                f.type_ref = try reader.takeLeb128(i32);
             }
             return .{ .opcode = opcode, .fields = fields };
         },
         -22 => { // func
-            const np = try leb.readUleb128(u32, reader);
+            const np = try reader.takeLeb128(u32);
             if (np > data_len) return error.EndOfStream;
             const func_args = try alloc.alloc(i32, np);
             errdefer if (np > 0) alloc.free(func_args);
-            for (func_args) |*a| a.* = try leb.readIleb128(i32, reader);
-            const nr = try leb.readUleb128(u32, reader);
+            for (func_args) |*a| a.* = try reader.takeLeb128(i32);
+            const nr = try reader.takeLeb128(u32);
             if (nr > data_len) return error.EndOfStream;
             const func_results = try alloc.alloc(i32, nr);
             errdefer if (nr > 0) alloc.free(func_results);
-            for (func_results) |*r| r.* = try leb.readIleb128(i32, reader);
-            const na = try leb.readUleb128(u32, reader);
+            for (func_results) |*r| r.* = try reader.takeLeb128(i32);
+            const na = try reader.takeLeb128(u32);
             var annotation: u8 = 0;
             for (0..na) |_| {
-                const a = try leb.readUleb128(u8, reader);
+                const a = try reader.takeLeb128(u8);
                 if (a > 3) return error.UnsupportedType;
                 annotation = a;
             }
             return .{ .opcode = opcode, .func_args = func_args, .func_results = func_results, .annotations = annotation };
         },
         -23 => { // service
-            const nm = try leb.readUleb128(u32, reader);
+            const nm = try reader.takeLeb128(u32);
             if (nm > data_len / 2) return error.EndOfStream;
             const methods = try alloc.alloc(FieldEntry, nm);
             errdefer alloc.free(methods);
@@ -409,14 +408,14 @@ fn parseTypeEntry(reader: anytype, alloc: Allocator, data_len: usize) !TypeEntry
             var prev_heap: ?[]u8 = null;
             defer if (prev_heap) |h| alloc.free(h);
             for (methods) |*m| {
-                const name_len = try leb.readUleb128(u32, reader);
+                const name_len = try reader.takeLeb128(u32);
                 if (name_len > data_len) return error.EndOfStream;
                 const is_heap = name_len > stack_bufs[0].len;
                 const name = if (is_heap)
                     alloc.alloc(u8, name_len) catch return error.OutOfMemory
                 else
                     stack_bufs[cur_stack][0..name_len];
-                reader.readNoEof(name) catch return error.EndOfStream;
+                reader.readSliceAll(name) catch return error.EndOfStream;
                 if (!std.unicode.utf8ValidateSlice(name))
                     return error.UnsupportedType;
                 if (prev_name.len > 0) {
@@ -428,14 +427,14 @@ fn parseTypeEntry(reader: anytype, alloc: Allocator, data_len: usize) !TypeEntry
                 prev_name = name;
                 if (!is_heap) cur_stack ^= 1;
                 m.hash = t.fieldHashRuntime(name);
-                m.type_ref = try leb.readIleb128(i32, reader);
+                m.type_ref = try reader.takeLeb128(i32);
             }
             return .{ .opcode = opcode, .fields = methods };
         },
         else => {
             if (opcode < type_principal) {
-                const count = try leb.readUleb128(u32, reader);
-                try reader.skipBytes(count, .{});
+                const count = try reader.takeLeb128(u32);
+                try reader.discardAll(count);
             }
             return .{ .opcode = opcode };
         },
@@ -679,7 +678,7 @@ fn decodeValue(comptime T: type, reader: anytype, table: []const TypeEntry, ref:
 
     // nat <: int coercion
     if (T == i128 and opcode == type_nat) {
-        const val = leb.readUleb128(u128, reader) catch |e| return mapLebError(e);
+        const val = reader.takeLeb128(u128) catch |e| return mapLebError(e);
         if (val > @as(u128, std.math.maxInt(i128))) return error.Overflow;
         return @intCast(val);
     }
@@ -703,7 +702,7 @@ fn decodePrimitive(comptime T: type, reader: anytype, opcode: i32, alloc: Alloca
     switch (opcode) {
         type_bool => {
             if (T != bool) return error.TypeMismatch;
-            const b = reader.readByte() catch return error.EndOfStream;
+            const b = reader.takeByte() catch return error.EndOfStream;
             return switch (b) {
                 0 => false,
                 1 => true,
@@ -728,11 +727,11 @@ fn decodePrimitive(comptime T: type, reader: anytype, opcode: i32, alloc: Alloca
         type_int64 => return decodeFixed(T, i64, reader),
         type_nat => {
             if (T != u128) return error.TypeMismatch;
-            return leb.readUleb128(u128, reader) catch |e| return mapLebError(e);
+            return reader.takeLeb128(u128) catch |e| return mapLebError(e);
         },
         type_int => {
             if (T != i128) return error.TypeMismatch;
-            return leb.readIleb128(i128, reader) catch |e| return mapLebError(e);
+            return reader.takeLeb128(i128) catch |e| return mapLebError(e);
         },
         type_float32 => return decodeFixed(T, f32, reader),
         type_float64 => return decodeFixed(T, f64, reader),
@@ -746,17 +745,17 @@ fn decodeFixed(comptime T: type, comptime Wire: type, reader: anytype) DecodeErr
     if (T != Wire) return error.TypeMismatch;
     const size = @divExact(@bitSizeOf(Wire), 8);
     var buf: [size]u8 = undefined;
-    reader.readNoEof(&buf) catch return error.EndOfStream;
+    reader.readSliceAll(&buf) catch return error.EndOfStream;
     const Uint = std.meta.Int(.unsigned, @bitSizeOf(Wire));
     return @bitCast(std.mem.littleToNative(Uint, @bitCast(buf)));
 }
 
 fn decodeText(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {
     if (comptime !t.isText(T)) return error.TypeMismatch;
-    const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+    const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
     const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
     errdefer alloc.free(buf);
-    reader.readNoEof(buf) catch return error.EndOfStream;
+    reader.readSliceAll(buf) catch return error.EndOfStream;
     if (!std.unicode.utf8ValidateSlice(buf)) return error.InvalidUtf8;
     return buf;
 }
@@ -770,35 +769,35 @@ fn decodeFunc(comptime T: type, reader: anytype, alloc: Allocator, entry: TypeEn
     if (comptime !t.isFuncType(T)) return error.TypeMismatch;
     // Validate annotation matches expected
     if (entry.annotations != @intFromEnum(T.annotation)) return error.TypeMismatch;
-    const flag = reader.readByte() catch return error.EndOfStream;
+    const flag = reader.takeByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
     const service = try decodePrincipalValue(reader, alloc);
     errdefer alloc.free(service.bytes);
-    const mlen = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+    const mlen = reader.takeLeb128(u32) catch |e| return mapLebError(e);
     const mbuf = alloc.alloc(u8, mlen) catch return error.OutOfMemory;
     errdefer alloc.free(mbuf);
-    reader.readNoEof(mbuf) catch return error.EndOfStream;
+    reader.readSliceAll(mbuf) catch return error.EndOfStream;
     return .{ .service = service, .method = mbuf };
 }
 
 fn decodeService(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {
     if (T != t.Service) return error.TypeMismatch;
-    const flag = reader.readByte() catch return error.EndOfStream;
+    const flag = reader.takeByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
-    const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+    const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
     const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
     errdefer alloc.free(buf);
-    reader.readNoEof(buf) catch return error.EndOfStream;
+    reader.readSliceAll(buf) catch return error.EndOfStream;
     return .{ .principal = .{ .bytes = buf } };
 }
 
 fn decodePrincipalValue(reader: anytype, alloc: Allocator) DecodeError!t.Principal {
-    const flag = reader.readByte() catch return error.EndOfStream;
+    const flag = reader.takeByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
-    const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+    const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
     const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
     errdefer alloc.free(buf);
-    reader.readNoEof(buf) catch return error.EndOfStream;
+    reader.readSliceAll(buf) catch return error.EndOfStream;
     return .{ .bytes = buf };
 }
 
@@ -806,7 +805,7 @@ fn decodeCompound(comptime T: type, reader: anytype, table: []const TypeEntry, e
     switch (entry.opcode) {
         type_opt => {
             if (@typeInfo(T) != .optional) return error.TypeMismatch;
-            const flag = reader.readByte() catch return error.EndOfStream;
+            const flag = reader.takeByte() catch return error.EndOfStream;
             if (flag == 0) return null;
             if (flag != 1) return error.TypeMismatch;
             const Child = @typeInfo(T).optional.child;
@@ -833,26 +832,26 @@ fn decodeCompound(comptime T: type, reader: anytype, table: []const TypeEntry, e
 
 fn decodeVec(comptime T: type, reader: anytype, table: []const TypeEntry, entry: TypeEntry, alloc: Allocator, data_len: usize, options: DecodeOptions, cycle_flags: []const bool) DecodeError!T {
     if (T == t.Blob) {
-        const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+        const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
         if (len > data_len) return error.EndOfStream;
         const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
         errdefer alloc.free(buf);
-        reader.readNoEof(buf) catch return error.EndOfStream;
+        reader.readSliceAll(buf) catch return error.EndOfStream;
         return .{ .data = buf };
     }
     if (comptime t.isText(T)) {
         if (entry.inner != type_nat8) return error.TypeMismatch;
-        const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+        const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
         if (len > data_len) return error.EndOfStream;
         const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
         errdefer alloc.free(buf);
-        reader.readNoEof(buf) catch return error.EndOfStream;
+        reader.readSliceAll(buf) catch return error.EndOfStream;
         return buf;
     }
     const info = @typeInfo(T);
     if (info != .pointer or info.pointer.size != .slice) return error.TypeMismatch;
     const Child = info.pointer.child;
-    const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+    const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
     if (len == 0) {
         const buf = alloc.alloc(Child, 0) catch return error.OutOfMemory;
         return buf;
@@ -917,8 +916,8 @@ fn decodeRecord(
 
     inline for (zig_fields, 0..) |zf, i| {
         if (!found[i]) {
-            if (@typeInfo(zf.type) == .optional) {
-                @field(result, zf.name) = null;
+            if (comptime hasDefault(zf.type)) {
+                @field(result, zf.name) = defaultValue(zf.type);
             } else if (zf.default_value_ptr) |ptr| {
                 const default: *const zf.type = @ptrCast(@alignCast(ptr));
                 @field(result, zf.name) = default.*;
@@ -941,7 +940,7 @@ fn decodeVariant(
     options: DecodeOptions,
     cycle_flags: []const bool,
 ) DecodeError!T {
-    const idx = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+    const idx = reader.takeLeb128(u32) catch |e| return mapLebError(e);
     if (idx >= wire_fields.len) return error.InvalidVariantIndex;
     const active = wire_fields[idx];
 
@@ -1024,13 +1023,13 @@ fn skipValueDepth(reader: anytype, table: []const TypeEntry, ref: i32, depth: us
         const entry = table[@intCast(ref)];
         switch (entry.opcode) {
             type_opt => {
-                const flag = reader.readByte() catch return error.EndOfStream;
+                const flag = reader.takeByte() catch return error.EndOfStream;
                 if (flag == 0) return;
                 if (flag != 1) return error.TypeMismatch;
                 try skipValueDepth(reader, table, entry.inner, depth + 1);
             },
             type_vec => {
-                const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+                const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
                 if (!isZeroSized(table, entry.inner)) {
                     for (0..len) |_| try skipValueDepth(reader, table, entry.inner, depth + 1);
                 }
@@ -1039,37 +1038,37 @@ fn skipValueDepth(reader: anytype, table: []const TypeEntry, ref: i32, depth: us
                 for (entry.fields) |f| try skipValueDepth(reader, table, f.type_ref, depth + 1);
             },
             type_variant => {
-                const vi = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+                const vi = reader.takeLeb128(u32) catch |e| return mapLebError(e);
                 if (vi < entry.fields.len) try skipValueDepth(reader, table, entry.fields[vi].type_ref, depth + 1);
             },
             type_func => {
-                const flag = reader.readByte() catch return error.EndOfStream;
+                const flag = reader.takeByte() catch return error.EndOfStream;
                 if (flag == 1) {
-                    const pf = reader.readByte() catch return error.EndOfStream;
+                    const pf = reader.takeByte() catch return error.EndOfStream;
                     if (pf == 1) {
-                        const pl = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-                        reader.skipBytes(pl, .{}) catch return error.EndOfStream;
+                        const pl = reader.takeLeb128(u32) catch |e| return mapLebError(e);
+                        reader.discardAll(pl) catch return error.EndOfStream;
                     }
-                    const ml = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-                    reader.skipBytes(ml, .{}) catch return error.EndOfStream;
+                    const ml = reader.takeLeb128(u32) catch |e| return mapLebError(e);
+                    reader.discardAll(ml) catch return error.EndOfStream;
                 }
             },
             type_service => {
-                const flag = reader.readByte() catch return error.EndOfStream;
+                const flag = reader.takeByte() catch return error.EndOfStream;
                 if (flag == 1) {
-                    const pl = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-                    reader.skipBytes(pl, .{}) catch return error.EndOfStream;
+                    const pl = reader.takeLeb128(u32) catch |e| return mapLebError(e);
+                    reader.discardAll(pl) catch return error.EndOfStream;
                 }
             },
             else => {
                 // Future types (opcode < -24): value is two LEB128 counts
                 // m and n, followed by m data bytes and n type references.
                 // See https://github.com/dfinity/candid/blob/master/spec/Candid.md
-                const m = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-                const n = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-                reader.skipBytes(m, .{}) catch return error.EndOfStream;
+                const m = reader.takeLeb128(u32) catch |e| return mapLebError(e);
+                const n = reader.takeLeb128(u32) catch |e| return mapLebError(e);
+                reader.discardAll(m) catch return error.EndOfStream;
                 for (0..n) |_| {
-                    const ref_idx = leb.readIleb128(i32, reader) catch |e| return mapLebError(e);
+                    const ref_idx = reader.takeLeb128(i32) catch |e| return mapLebError(e);
                     try skipValueDepth(reader, table, ref_idx, depth + 1);
                 }
             },
@@ -1079,30 +1078,30 @@ fn skipValueDepth(reader: anytype, table: []const TypeEntry, ref: i32, depth: us
     switch (ref) {
         type_null, type_reserved => {},
         type_bool => {
-            const b = reader.readByte() catch return error.EndOfStream;
+            const b = reader.takeByte() catch return error.EndOfStream;
             if (b > 1) return error.TypeMismatch;
         },
         type_nat8, type_int8 => {
-            _ = reader.readByte() catch return error.EndOfStream;
+            _ = reader.takeByte() catch return error.EndOfStream;
         },
-        type_nat16, type_int16 => reader.skipBytes(2, .{}) catch return error.EndOfStream,
-        type_nat32, type_int32, type_float32 => reader.skipBytes(4, .{}) catch return error.EndOfStream,
-        type_nat64, type_int64, type_float64 => reader.skipBytes(8, .{}) catch return error.EndOfStream,
+        type_nat16, type_int16 => reader.discardAll(2) catch return error.EndOfStream,
+        type_nat32, type_int32, type_float32 => reader.discardAll(4) catch return error.EndOfStream,
+        type_nat64, type_int64, type_float64 => reader.discardAll(8) catch return error.EndOfStream,
         type_nat => {
-            _ = leb.readUleb128(u128, reader) catch |e| return mapLebError(e);
+            _ = reader.takeLeb128(u128) catch |e| return mapLebError(e);
         },
         type_int => {
-            _ = leb.readIleb128(i128, reader) catch |e| return mapLebError(e);
+            _ = reader.takeLeb128(i128) catch |e| return mapLebError(e);
         },
         type_text => {
-            const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
+            const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
             var remaining: usize = len;
             var carry: usize = 0;
             var buf: [256]u8 = undefined;
             while (remaining > 0) {
                 const to_read = @min(remaining, buf.len - carry);
                 const slice = buf[carry..][0..to_read];
-                reader.readNoEof(slice) catch return error.EndOfStream;
+                reader.readSliceAll(slice) catch return error.EndOfStream;
                 const filled = carry + to_read;
                 const valid_end = validUtf8Prefix(buf[0..filled]);
                 if (valid_end == 0 and filled >= 4) return error.InvalidUtf8;
@@ -1115,10 +1114,10 @@ fn skipValueDepth(reader: anytype, table: []const TypeEntry, ref: i32, depth: us
             if (carry > 0) return error.InvalidUtf8;
         },
         type_principal => {
-            const flag = reader.readByte() catch return error.EndOfStream;
+            const flag = reader.takeByte() catch return error.EndOfStream;
             if (flag == 1) {
-                const len = leb.readUleb128(u32, reader) catch |e| return mapLebError(e);
-                reader.skipBytes(len, .{}) catch return error.EndOfStream;
+                const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
+                reader.discardAll(len) catch return error.EndOfStream;
             }
         },
         else => return error.UnsupportedType,

@@ -1,7 +1,6 @@
 const std = @import("std");
 const leb = std.leb;
 const Allocator = std.mem.Allocator;
-const List = std.array_list.AlignedManaged(u8, null);
 const t = @import("types.zig");
 
 pub const empty_args: []const u8 = &[_]u8{ 'D', 'I', 'D', 'L', 0x00, 0x00 };
@@ -14,39 +13,39 @@ pub fn encode(alloc: Allocator, args: anytype) ![]const u8 {
 
     const header = comptime buildHeader(ArgsType);
 
-    var list = List.init(alloc);
-    errdefer list.deinit();
-    try list.appendSlice(header);
+    var aw = std.Io.Writer.Allocating.init(alloc);
+    errdefer aw.deinit();
+    const writer = &aw.writer;
+    try writer.writeAll(header);
 
-    const writer = list.writer();
     inline for (info.@"struct".fields) |field| {
         try encodeValue(writer, field.type, @field(args, field.name));
     }
 
-    return list.toOwnedSlice();
+    return aw.toOwnedSlice();
 }
 
-fn encodeValue(writer: anytype, comptime T: type, value: T) Allocator.Error!void {
+fn encodeValue(writer: anytype, comptime T: type, value: T) std.Io.Writer.Error!void {
     if (T == t.Principal) {
         try writer.writeByte(1);
-        try leb.writeUleb128(writer, @as(u32, @intCast(value.bytes.len)));
+        try writer.writeUleb128(@as(u32, @intCast(value.bytes.len)));
         return writer.writeAll(value.bytes);
     }
     if (T == t.Blob) {
-        try leb.writeUleb128(writer, @as(u32, @intCast(value.data.len)));
+        try writer.writeUleb128(@as(u32, @intCast(value.data.len)));
         return writer.writeAll(value.data);
     }
     if (comptime t.isFuncType(T)) {
         try writer.writeByte(1);
         try writer.writeByte(1);
-        try leb.writeUleb128(writer, @as(u32, @intCast(value.service.bytes.len)));
+        try writer.writeUleb128(@as(u32, @intCast(value.service.bytes.len)));
         try writer.writeAll(value.service.bytes);
-        try leb.writeUleb128(writer, @as(u32, @intCast(value.method.len)));
+        try writer.writeUleb128(@as(u32, @intCast(value.method.len)));
         return writer.writeAll(value.method);
     }
     if (T == t.Service) {
         try writer.writeByte(1);
-        try leb.writeUleb128(writer, @as(u32, @intCast(value.principal.bytes.len)));
+        try writer.writeUleb128(@as(u32, @intCast(value.principal.bytes.len)));
         return writer.writeAll(value.principal.bytes);
     }
     if (T == t.Reserved) return;
@@ -60,7 +59,7 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) Allocator.Error!void
                 16 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u16, value))),
                 32 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u32, value))),
                 64 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u64, value))),
-                128 => return leb.writeUleb128(writer, value),
+                128 => return writer.writeUleb128(value),
                 else => @compileError("unsupported int width"),
             },
             .signed => switch (info.bits) {
@@ -68,7 +67,7 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) Allocator.Error!void
                 16 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u16, @bitCast(value)))),
                 32 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u32, @bitCast(value)))),
                 64 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u64, @bitCast(value)))),
-                128 => return leb.writeIleb128(writer, value),
+                128 => return writer.writeSleb128(value),
                 else => @compileError("unsupported int width"),
             },
         },
@@ -91,10 +90,10 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) Allocator.Error!void
             }
             if (p.size != .slice) @compileError("unsupported pointer type: " ++ @typeName(T));
             if (p.child == u8) {
-                try leb.writeUleb128(writer, @as(u32, @intCast(value.len)));
+                try writer.writeUleb128(@as(u32, @intCast(value.len)));
                 return writer.writeAll(value);
             }
-            try leb.writeUleb128(writer, @as(u32, @intCast(value.len)));
+            try writer.writeUleb128(@as(u32, @intCast(value.len)));
             for (value) |elem| {
                 try encodeValue(writer, p.child, elem);
             }
@@ -116,7 +115,7 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) Allocator.Error!void
                         }
                         unreachable;
                     };
-                    try leb.writeUleb128(writer, idx);
+                    try writer.writeUleb128(idx);
                     if (@TypeOf(payload) != void) {
                         try encodeValue(writer, @TypeOf(payload), payload);
                     }

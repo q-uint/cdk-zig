@@ -3,12 +3,17 @@ const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
 
+fn initPic() !pic.PocketIc {
+    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
+    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
+}
+
 fn readWasm() ![]const u8 {
-    return std.fs.cwd().readFileAlloc(allocator, "zig-out/bin/stable.wasm", 10 * 1024 * 1024);
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig-out/bin/stable.wasm", allocator, .limited(10 * 1024 * 1024));
 }
 
 fn readWasm64() ![]const u8 {
-    return std.fs.cwd().readFileAlloc(allocator, "zig-out/bin/stable64.wasm", 10 * 1024 * 1024);
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig-out/bin/stable64.wasm", allocator, .limited(10 * 1024 * 1024));
 }
 
 fn expectReply(
@@ -36,7 +41,7 @@ test "stable_size starts at zero" {
     const wasm = try readWasm();
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -54,7 +59,7 @@ test "grow and size" {
     const wasm = try readWasm();
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -78,7 +83,7 @@ test "write and read round-trip" {
     const wasm = try readWasm();
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -111,7 +116,7 @@ test "write and read at page boundary" {
     const wasm = try readWasm();
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -145,7 +150,7 @@ test "streaming writer and reader" {
     const wasm = try readWasm();
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -175,7 +180,7 @@ test "counter persists across upgrade" {
     const wasm = try readWasm();
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
@@ -206,7 +211,7 @@ test "wasm64: write and read round-trip" {
     const wasm = try readWasm64();
     defer allocator.free(wasm);
 
-    var pocket = try pic.PocketIc.init(allocator, .{});
+    var pocket = try initPic();
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();

@@ -61,14 +61,14 @@ pub const Trace = struct {
 
     // Write folded stacks to a file. Each line is:
     //   func_a;func_b;func_c 1234
-    pub fn writeFoldedStacks(self: *const Trace, path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
+    pub fn writeFoldedStacks(self: *const Trace, io: std.Io, path: []const u8) !void {
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
         for (self.lines.items) |line| {
-            try file.writeAll(line.stack);
+            try file.writeStreamingAll(io, line.stack);
             var cost_buf: [32]u8 = undefined;
             const cost_str = std.fmt.bufPrint(&cost_buf, " {d}\n", .{line.cost}) catch unreachable;
-            try file.writeAll(cost_str);
+            try file.writeStreamingAll(io, cost_str);
         }
     }
 };
@@ -105,7 +105,7 @@ pub fn fetch(
     }
 
     // Fetch all trace pages.
-    var all_entries = std.ArrayListUnmanaged(TraceEntry){};
+    var all_entries: std.ArrayListUnmanaged(TraceEntry) = .empty;
     defer all_entries.deinit(allocator);
 
     var page: u32 = 0;
@@ -179,7 +179,7 @@ fn buildFoldedStacks(
     names: std.AutoArrayHashMapUnmanaged(i32, []const u8),
     metric: Metric,
 ) !Trace {
-    var lines = std.ArrayListUnmanaged(FoldedLine){};
+    var lines: std.ArrayListUnmanaged(FoldedLine) = .empty;
     errdefer {
         for (lines.items) |line| allocator.free(line.stack);
         lines.deinit(allocator);
@@ -214,7 +214,7 @@ fn buildFoldedStacks(
 
             if (self_cost > 0) {
                 // Build the stack string: "parent;child;grandchild"
-                var path = std.ArrayListUnmanaged(u8){};
+                var path: std.ArrayListUnmanaged(u8) = .empty;
                 defer path.deinit(allocator);
                 for (0..depth + 1) |i| {
                     if (i > 0) try path.append(allocator, ';');
