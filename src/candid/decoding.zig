@@ -743,11 +743,12 @@ fn decodePrimitive(comptime T: type, reader: anytype, opcode: i32, alloc: Alloca
 
 fn decodeFixed(comptime T: type, comptime Wire: type, reader: anytype) DecodeError!T {
     if (T != Wire) return error.TypeMismatch;
-    const size = @divExact(@bitSizeOf(Wire), 8);
-    var buf: [size]u8 = undefined;
-    reader.readSliceAll(&buf) catch return error.EndOfStream;
+    if (@typeInfo(Wire) == .int) {
+        return reader.takeInt(Wire, .little) catch return error.EndOfStream;
+    }
     const Uint = std.meta.Int(.unsigned, @bitSizeOf(Wire));
-    return @bitCast(std.mem.littleToNative(Uint, @bitCast(buf)));
+    const bits = reader.takeInt(Uint, .little) catch return error.EndOfStream;
+    return @bitCast(bits);
 }
 
 fn decodeText(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {

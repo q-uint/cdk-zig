@@ -53,27 +53,17 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) std.Io.Writer.Error!
     switch (@typeInfo(T)) {
         .bool => return writer.writeByte(if (value) 1 else 0),
         .void => return,
-        .int => |info| switch (info.signedness) {
-            .unsigned => switch (info.bits) {
-                8 => return writer.writeByte(value),
-                16 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u16, value))),
-                32 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u32, value))),
-                64 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u64, value))),
-                128 => return writer.writeUleb128(value),
-                else => @compileError("unsupported int width"),
+        .int => |info| switch (info.bits) {
+            8, 16, 32, 64 => return writer.writeInt(T, value, .little),
+            128 => return switch (info.signedness) {
+                .unsigned => writer.writeUleb128(value),
+                .signed => writer.writeSleb128(value),
             },
-            .signed => switch (info.bits) {
-                8 => return writer.writeByte(@bitCast(value)),
-                16 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u16, @bitCast(value)))),
-                32 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u32, @bitCast(value)))),
-                64 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u64, @bitCast(value)))),
-                128 => return writer.writeSleb128(value),
-                else => @compileError("unsupported int width"),
-            },
+            else => @compileError("unsupported int width"),
         },
         .float => |info| switch (info.bits) {
-            32 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u32, @bitCast(value)))),
-            64 => return writer.writeAll(&std.mem.toBytes(std.mem.nativeToLittle(u64, @bitCast(value)))),
+            32 => return writer.writeInt(u32, @bitCast(value), .little),
+            64 => return writer.writeInt(u64, @bitCast(value), .little),
             else => @compileError("unsupported float width"),
         },
         .optional => |o| {
