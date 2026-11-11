@@ -2,59 +2,19 @@
 
 Two canisters demonstrating Candid-encoded arguments and replies.
 
-The `callee` accepts a Candid-encoded `text` name and returns a
-`record { greeting: text }`. The `caller` uses `CandidCallFuture`-style
-encoding to make a typed inter-canister call and forwards the result.
+## What it does
 
-## Prerequisites
+`callee` accepts a Candid-encoded `text` name and returns a
+`record { greeting: text }`. `caller` makes a typed inter-canister call using
+Candid encoding and forwards the result.
 
-- Zig 0.15+
-- [icp-cli](https://github.com/dfinity/icp-cli)
+## Build and test
 
-## Build
-
-```sh
-zig build
+```
+zig build        # compile both canisters to wasm
+zig build test   # run the e2e tests via PocketIC
 ```
 
-This produces `zig-out/bin/callee.wasm` and `zig-out/bin/caller.wasm`.
-
-## Deploy
-
-```sh
-icp network start --background
-icp deploy callee
-CALLEE=$(icp canister status -i callee)
-icp canister create caller
-icp canister install caller --args-format hex --args "$(echo -n $CALLEE | xxd -p)"
-```
-
-## Test
-
-Query the callee directly (returns `record { greeting = "hello, world!" }`):
-
-```sh
-icp canister call callee greet '("world")' -o auto
-```
-
-Make the caller call into the callee:
-
-```sh
-icp canister call caller call_greet --args-format hex "" -o auto
-```
-
-## Rebuild and upgrade
-
-```sh
-zig build callee
-icp canister install callee --mode upgrade
-
-zig build caller
-icp canister install caller --mode upgrade
-```
-
-Or rebuild and upgrade everything:
-
-```sh
-icp deploy --upgrade-unchanged
-```
+This produces `zig-out/bin/callee.wasm` and `zig-out/bin/caller.wasm`. The test
+suite boots a replica, installs both canisters, and drives the call end to end.
+It is skipped when `POCKET_IC_BIN` is unset; `nix develop` sets it for you.

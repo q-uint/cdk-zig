@@ -18,8 +18,8 @@ pub fn encode(alloc: Allocator, args: anytype) ![]const u8 {
     const writer = &aw.writer;
     try writer.writeAll(header);
 
-    inline for (info.@"struct".fields) |field| {
-        try encodeValue(writer, field.type, @field(args, field.name));
+    inline for (info.@"struct".field_names, info.@"struct".field_types) |name, FieldType| {
+        try encodeValue(writer, FieldType, @field(args, name));
     }
 
     return aw.toOwnedSlice();
@@ -118,11 +118,11 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) std.Io.Writer.Error!
 
 fn buildHeader(comptime ArgsType: type) []const u8 {
     comptime {
-        const fields = @typeInfo(ArgsType).@"struct".fields;
+        const field_types = @typeInfo(ArgsType).@"struct".field_types;
 
         var compound: []const type = &.{};
-        for (fields) |f| {
-            compound = collectCompound(f.type, compound);
+        for (field_types) |FieldType| {
+            compound = collectCompound(FieldType, compound);
         }
 
         var bytes: []const u8 = "DIDL";
@@ -132,9 +132,9 @@ fn buildHeader(comptime ArgsType: type) []const u8 {
             bytes = bytes ++ typeDef(ct, compound);
         }
 
-        bytes = bytes ++ t.ulebComptime(fields.len);
-        for (fields) |f| {
-            bytes = bytes ++ t.slebComptime(typeRef(f.type, compound));
+        bytes = bytes ++ t.ulebComptime(field_types.len);
+        for (field_types) |FieldType| {
+            bytes = bytes ++ t.slebComptime(typeRef(FieldType, compound));
         }
 
         return bytes;
@@ -165,14 +165,14 @@ fn collectCompound(comptime T: type, comptime existing: []const type) []const ty
         .@"struct" => |s| {
             var result = appendType(existing, T);
             if (result.len == existing.len) return result;
-            for (s.fields) |f| result = collectCompound(f.type, result);
+            for (s.field_types) |FieldType| result = collectCompound(FieldType, result);
             return result;
         },
         .@"union" => |u_info| {
             var result = appendType(existing, T);
             if (result.len == existing.len) return result;
-            for (u_info.fields) |f| {
-                if (f.type != void) result = collectCompound(f.type, result);
+            for (u_info.field_types) |FieldType| {
+                if (FieldType != void) result = collectCompound(FieldType, result);
             }
             return result;
         },
@@ -190,7 +190,7 @@ fn appendType(comptime existing: []const type, comptime T: type) []const type {
 fn typeDef(comptime T: type, comptime table: []const type) []const u8 {
     if (T == t.Blob) return t.slebComptime(t.type_vec) ++ t.slebComptime(t.type_nat8);
     if (comptime t.isFuncType(T)) {
-        const ann = @intFromEnum(T.annotation);
+        const ann = @backingInt(T.annotation);
         return t.slebComptime(t.type_func) ++ t.ulebComptime(0) ++ t.ulebComptime(0) ++
             if (ann != 0) t.ulebComptime(1) ++ t.ulebComptime(ann) else t.ulebComptime(0);
     }

@@ -165,14 +165,13 @@ pub const SortedField = struct {
     field_type: type,
 };
 
-pub fn sortedStructFields(comptime T: type) [@typeInfo(T).@"struct".fields.len]SortedField {
+pub fn sortedStructFields(comptime T: type) [@typeInfo(T).@"struct".field_names.len]SortedField {
     comptime {
         const s = @typeInfo(T).@"struct";
-        const fields = s.fields;
-        var result: [fields.len]SortedField = undefined;
-        for (fields, 0..) |f, i| {
-            const hash: u32 = if (s.is_tuple) @intCast(i) else fieldHash(f.name);
-            result[i] = .{ .hash = hash, .name = f.name, .field_type = f.type };
+        var result: [s.field_names.len]SortedField = undefined;
+        for (s.field_names, s.field_types, 0..) |name, FieldType, i| {
+            const hash: u32 = if (s.is_tuple) @intCast(i) else fieldHash(name);
+            result[i] = .{ .hash = hash, .name = name, .field_type = FieldType };
         }
         for (0..result.len) |i| {
             for (i + 1..result.len) |j| {
@@ -187,12 +186,12 @@ pub fn sortedStructFields(comptime T: type) [@typeInfo(T).@"struct".fields.len]S
     }
 }
 
-pub fn sortedUnionFields(comptime T: type) [@typeInfo(T).@"union".fields.len]SortedField {
+pub fn sortedUnionFields(comptime T: type) [@typeInfo(T).@"union".field_names.len]SortedField {
     comptime {
-        const fields = @typeInfo(T).@"union".fields;
-        var result: [fields.len]SortedField = undefined;
-        for (fields, 0..) |f, i| {
-            result[i] = .{ .hash = fieldHash(f.name), .name = f.name, .field_type = f.type };
+        const u = @typeInfo(T).@"union";
+        var result: [u.field_names.len]SortedField = undefined;
+        for (u.field_names, u.field_types, 0..) |name, FieldType, i| {
+            result[i] = .{ .hash = fieldHash(name), .name = name, .field_type = FieldType };
         }
         for (0..result.len) |i| {
             for (i + 1..result.len) |j| {

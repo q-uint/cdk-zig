@@ -25,10 +25,10 @@ pub fn encodedSize(value: anytype) usize {
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
             if (comptime isByteString(T)) return headSize(value.data.len) + value.data.len;
-            var size = headSize(info.fields.len);
-            inline for (info.fields) |f| {
-                size += headSize(f.name.len) + f.name.len;
-                size += encodedSize(@field(value, f.name));
+            var size = headSize(info.field_names.len);
+            inline for (info.field_names) |name| {
+                size += headSize(name.len) + name.len;
+                size += encodedSize(@field(value, name));
             }
             return size;
         },
@@ -73,12 +73,12 @@ fn encodeInto(buf: []u8, pos: *usize, value: anytype) void {
                 pos.* += value.data.len;
                 return;
             }
-            writeHead(buf, pos, MAJOR_MAP, info.fields.len);
-            inline for (info.fields) |f| {
-                writeHead(buf, pos, MAJOR_TEXT, f.name.len);
-                @memcpy(buf[pos.*..][0..f.name.len], f.name);
-                pos.* += f.name.len;
-                encodeInto(buf, pos, @field(value, f.name));
+            writeHead(buf, pos, MAJOR_MAP, info.field_names.len);
+            inline for (info.field_names) |name| {
+                writeHead(buf, pos, MAJOR_TEXT, name.len);
+                @memcpy(buf[pos.*..][0..name.len], name);
+                pos.* += name.len;
+                encodeInto(buf, pos, @field(value, name));
             }
         },
         .pointer => |ptr_info| {

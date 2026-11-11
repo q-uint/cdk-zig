@@ -346,7 +346,8 @@ test "var: many variable-size entries" {
 
     _ = try s.log.append("short");
     _ = try s.log.append("a medium length string for testing");
-    _ = try s.log.append("x" ** 200);
+    const long: [200]u8 = @splat('x');
+    _ = try s.log.append(&long);
     _ = try s.log.append("");
     _ = try s.log.append("final");
 
@@ -366,10 +367,10 @@ test "var: many variable-size entries" {
 test "fixed: append and get" {
     var s = try initFixed();
 
-    var entry1 = [_]u8{0} ** 32;
+    var entry1: [32]u8 = @splat(0);
     @memcpy(entry1[0..5], "hello");
 
-    var entry2 = [_]u8{0} ** 32;
+    var entry2: [32]u8 = @splat(0);
     @memcpy(entry2[0..5], "world");
 
     const idx0 = try s.log.append(&entry1);
@@ -397,7 +398,7 @@ test "fixed: get out of range returns false" {
 test "fixed: entrySize is constant" {
     var s = try initFixed();
 
-    const entry = [_]u8{0xAA} ** 32;
+    const entry: [32]u8 = @splat(0xAA);
     _ = try s.log.append(&entry);
 
     try std.testing.expectEqual(@as(u64, 32), s.log.entrySize(0).?);
@@ -407,7 +408,7 @@ test "fixed: entrySize is constant" {
 test "fixed: init is idempotent" {
     var s = try initFixed();
 
-    const entry = [_]u8{0xBB} ** 32;
+    const entry: [32]u8 = @splat(0xBB);
     _ = try s.log.append(&entry);
 
     var log2 = try FixedLog32.init(s.alloc, 0);

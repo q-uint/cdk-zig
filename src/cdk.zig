@@ -102,7 +102,7 @@ pub fn argData() []const u8 {
 }
 
 pub fn msgRejectCode() RejectCode {
-    return @enumFromInt(@as(u32, @intCast(ic0.msg_reject_code())));
+    return @fromBackingInt(@intCast(@as(u32, @intCast(ic0.msg_reject_code()))));
 }
 
 pub fn msgRejectMsg() []const u8 {
@@ -194,7 +194,7 @@ pub fn canisterLiquidCycleBalance128() u128 {
 }
 
 pub fn canisterStatus() CanisterStatusCode {
-    return @enumFromInt(@as(u32, @intCast(ic0.canister_status())));
+    return @fromBackingInt(@intCast(@as(u32, @intCast(ic0.canister_status()))));
 }
 
 pub fn canisterVersion() u64 {
@@ -221,7 +221,7 @@ pub fn globalTimerSet(timestamp: u64) u64 {
 
 // Performance
 pub fn performanceCounter(counter_type: PerformanceCounterType) u64 {
-    return @intCast(ic0.performance_counter(@intCast(@intFromEnum(counter_type))));
+    return @intCast(ic0.performance_counter(@intCast(@backingInt(counter_type))));
 }
 
 pub fn instructionCounter() u64 {

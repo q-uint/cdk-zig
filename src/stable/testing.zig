@@ -12,7 +12,7 @@ const wasm_page_size = memory.wasm_page_size;
 pub const page_count = 16;
 const total = page_count * wasm_page_size;
 
-var data: [total]u8 = [_]u8{0} ** total;
+var data: [total]u8 = @splat(0);
 /// Current number of allocated pages (mirrors `stable64_size`).
 pub var pages: u64 = 0;
 

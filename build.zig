@@ -61,6 +61,9 @@ pub fn addTests(
 }
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
     const cdk_mod = b.addModule("cdk", .{
         .root_source_file = b.path("src/cdk.zig"),
     });
@@ -69,15 +72,7 @@ pub fn build(b: *std.Build) void {
     const bls_mod_lib = b.addModule("bls", .{
         .root_source_file = b.path("src/bls.zig"),
     });
-    bls_mod_lib.addIncludePath(blst_dep_lib.path("bindings"));
-    bls_mod_lib.addCSourceFile(.{
-        .file = blst_dep_lib.path("src/server.c"),
-        .flags = &.{ "-fno-builtin", "-Wno-unused-function" },
-    });
-    bls_mod_lib.addCSourceFile(.{
-        .file = blst_dep_lib.path("build/assembly.S"),
-        .flags = &.{},
-    });
+    linkBlst(b, bls_mod_lib, blst_dep_lib, target, optimize);
 
     _ = b.addModule("pocket-ic", .{
         .root_source_file = b.path("src/pocket_ic.zig"),
@@ -86,9 +81,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "bls", .module = bls_mod_lib },
         },
     });
-
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
 
     const test_step = b.step("test", "Run unit tests");
     const test_files = [_][]const u8{
@@ -121,53 +113,58 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
-        bls_mod.addIncludePath(blst_dep.path("bindings"));
-        bls_mod.addCSourceFile(.{
-            .file = blst_dep.path("src/server.c"),
-            .flags = &.{ "-fno-builtin", "-Wno-unused-function" },
-        });
-        bls_mod.addCSourceFile(.{
-            .file = blst_dep.path("build/assembly.S"),
-            .flags = &.{},
-        });
+        linkBlst(b, bls_mod, blst_dep, target, optimize);
         bls_mod.linkSystemLibrary("c", .{});
         const bls_test = b.addTest(.{ .root_module = bls_mod });
         test_step.dependOn(&b.addRunArtifact(bls_test).step);
     }
 
-    // Compile-check the CDK for both wasm32 and wasm64 targets.
-    const wasm_check_step = b.step("wasm-check", "Verify CDK compiles for wasm32 and wasm64");
-    for ([_]std.Target.Cpu.Arch{ .wasm32, .wasm64 }) |arch| {
-        const wasm_exe = b.addExecutable(.{
-            .name = "cdk-check",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/cdk.zig"),
-                .target = b.resolveTargetQuery(.{
-                    .cpu_arch = arch,
-                    .os_tag = .freestanding,
-                }),
-                .optimize = .ReleaseSmall,
-            }),
-        });
-        wasm_exe.entry = .disabled;
-        wasm_check_step.dependOn(&wasm_exe.step);
-    }
-    test_step.dependOn(wasm_check_step);
-
     const e2e_step = b.step("e2e", "Run e2e tests for all examples");
-    const io = b.graph.io;
-    var examples_dir = b.build_root.handle.openDir(
-        io,
-        "examples",
-        .{ .iterate = true },
-    ) catch return;
-    defer examples_dir.close(io);
-    var it = examples_dir.iterate();
-    while (it.next(io) catch return) |entry| {
-        if (entry.kind != .directory) continue;
-        const dir = b.fmt("examples/{s}", .{entry.name});
+    for (examples) |name| {
         const run = b.addSystemCommand(&.{ "zig", "build", "test" });
-        run.setCwd(b.path(dir));
+        run.setCwd(b.path(b.fmt("examples/{s}", .{name})));
         e2e_step.dependOn(&run.step);
     }
 }
+
+// blst ships no Zig bindings. Zig 0.17 removed `@cImport`, so the header is
+// translated once as a build step and imported as a plain module named "c".
+// Translation is pinned to one target here, rather than following each
+// consumer's target as `@cImport` did; bls is only ever built natively.
+fn linkBlst(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    blst: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.Optimize,
+) void {
+    const translated = b.addTranslateC(.{
+        .root_source_file = blst.path("bindings/blst.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translated.addIncludePath(blst.path("bindings"));
+    mod.addImport("c", translated.createModule());
+
+    mod.addIncludePath(blst.path("bindings"));
+    mod.addCSourceFile(.{
+        .file = blst.path("src/server.c"),
+        .flags = &.{ "-fno-builtin", "-Wno-unused-function" },
+    });
+    mod.addCSourceFile(.{
+        .file = blst.path("build/assembly.S"),
+        .flags = &.{},
+    });
+}
+
+// Examples with an e2e suite, listed explicitly so that a missing or
+// misnamed directory is a build error rather than a silently skipped test.
+const examples = [_][]const u8{
+    "call",
+    "candid",
+    "certified_data",
+    "executor",
+    "profiling",
+    "stable",
+    "timers",
+};

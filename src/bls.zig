@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @cImport(@cInclude("blst.h"));
+const c = @import("c");
 
 pub const Error = error{
     BadEncoding,

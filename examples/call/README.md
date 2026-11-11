@@ -2,57 +2,19 @@
 
 Two canisters: `caller` makes an inter-canister call to `callee`.
 
-## Prerequisites
+## What it does
 
-- Zig 0.15+
-- [icp-cli](https://github.com/dfinity/icp-cli)
+`callee` exposes a `greet` query returning `"hello from callee"`. `caller`
+receives the callee's principal as its install argument, and its `call_greet`
+update forwards the reply from that call on to its own caller.
 
-## Build
+## Build and test
 
-```sh
-zig build
+```
+zig build        # compile both canisters to wasm
+zig build test   # run the e2e tests via PocketIC
 ```
 
-This produces `zig-out/bin/callee.wasm` and `zig-out/bin/caller.wasm`.
-
-## Deploy
-
-```sh
-icp network start --background
-icp deploy callee
-CALLEE=$(icp canister status -i callee)
-icp canister create caller
-icp canister install caller --args-format hex --args "$(echo -n $CALLEE | xxd -p)"
-```
-
-## Test
-
-Query the callee directly:
-
-```sh
-icp canister call callee greet --args-format hex "" -o auto
-```
-
-Make the caller call into the callee (returns "hello from callee"):
-
-```sh
-icp canister call caller call_greet --args-format hex "" -o auto
-```
-
-## Rebuild and upgrade
-
-After changing source code, rebuild and upgrade a single canister:
-
-```sh
-zig build callee
-icp canister install callee --mode upgrade
-
-zig build caller
-icp canister install caller --mode upgrade
-```
-
-Or rebuild and upgrade everything:
-
-```sh
-icp deploy --upgrade-unchanged
-```
+This produces `zig-out/bin/callee.wasm` and `zig-out/bin/caller.wasm`. The test
+suite boots a replica, installs both canisters, and drives the call end to end.
+It is skipped when `POCKET_IC_BIN` is unset; `nix develop` sets it for you.

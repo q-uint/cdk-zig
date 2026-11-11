@@ -10,14 +10,14 @@ pub const Encoding = struct {
         const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
         return Encoding{
             .encode_map = blk: {
-                var a = [_]u8{0xFF} ** 32;
+                var a: [32]u8 = @splat(0xFF);
                 for (alphabet, 0..) |c, i| {
                     a[i] = c;
                 }
                 break :blk a;
             },
             .decode_map = blk: {
-                var a = [_]u8{0xFF} ** 256;
+                var a: [256]u8 = @splat(0xFF);
                 for (alphabet, 0..) |c, i| {
                     a[@intCast(c)] = @intCast(i);
                 }

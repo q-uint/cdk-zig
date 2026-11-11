@@ -96,15 +96,15 @@ pub fn freeDecoded(comptime T: type, alloc: Allocator, val: T) void {
             if (val) |v| freeDecoded(@typeInfo(T).optional.child, alloc, v);
         },
         .@"struct" => |s| {
-            inline for (s.fields) |field| {
-                freeDecoded(field.type, alloc, @field(val, field.name));
+            inline for (s.field_names, s.field_types) |name, FieldType| {
+                freeDecoded(FieldType, alloc, @field(val, name));
             }
         },
         .@"union" => |u| {
             if (u.tag_type) |_| {
-                inline for (u.fields) |field| {
-                    if (val == @field(T, field.name)) {
-                        freeDecoded(field.type, alloc, @field(val, field.name));
+                inline for (u.field_names, u.field_types) |name, FieldType| {
+                    if (val == @field(T, name)) {
+                        freeDecoded(FieldType, alloc, @field(val, name));
                         return;
                     }
                 }
@@ -160,10 +160,11 @@ pub fn decodeMany(comptime Types: type, alloc: Allocator, data: []const u8) Deco
 
 pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const u8, options: DecodeOptions) DecodeError!Types {
     const info = @typeInfo(Types);
-    if (info != .@"struct" or (!info.@"struct".is_tuple and info.@"struct".fields.len > 0))
+    if (info != .@"struct" or (!info.@"struct".is_tuple and info.@"struct".field_names.len > 0))
         @compileError("Types must be a tuple, e.g. struct { u32, []const u8 }");
 
-    const fields = info.@"struct".fields;
+    const field_names = info.@"struct".field_names;
+    const field_types = info.@"struct".field_types;
 
     var fbs = std.Io.Reader.fixed(data);
     const reader = &fbs;
@@ -263,29 +264,29 @@ pub fn decodeManyAdvanced(comptime Types: type, alloc: Allocator, data: []const 
         r.* = reader.takeLeb128(i32) catch |e| return mapLebError(e);
     }
 
-    const readable = @min(arg_count, fields.len);
+    const readable = @min(arg_count, field_types.len);
 
     var result: Types = undefined;
-    inline for (fields, 0..) |field, i| {
+    inline for (field_types, 0..) |FieldType, i| {
         if (i < readable) {
-            result[i] = try decodeValue(field.type, reader, type_table, all_refs[i], alloc, data.len, options, cycle_flags);
+            result[i] = try decodeValue(FieldType, reader, type_table, all_refs[i], alloc, data.len, options, cycle_flags);
         } else {
-            if (comptime !hasDefault(field.type)) return error.TypeMismatch;
-            result[i] = defaultValue(field.type);
+            if (comptime !hasDefault(FieldType)) return error.TypeMismatch;
+            result[i] = defaultValue(FieldType);
         }
     }
 
     // Skip values of extra args beyond what fields consumes
-    if (arg_count > fields.len) {
-        for (fields.len..arg_count) |i| {
+    if (arg_count > field_types.len) {
+        for (field_types.len..arg_count) |i| {
             try skipValue(reader, type_table, all_refs[i]);
         }
     }
 
     // Reject trailing bytes after all args are consumed
     if (fbs.seek != data.len) {
-        inline for (fields) |field| {
-            freeDecoded(field.type, alloc, @field(result, field.name));
+        inline for (field_names, field_types) |name, FieldType| {
+            freeDecoded(FieldType, alloc, @field(result, name));
         }
         return error.TrailingBytes;
     }
@@ -746,7 +747,7 @@ fn decodeFixed(comptime T: type, comptime Wire: type, reader: anytype) DecodeErr
     if (@typeInfo(Wire) == .int) {
         return reader.takeInt(Wire, .little) catch return error.EndOfStream;
     }
-    const Uint = std.meta.Int(.unsigned, @bitSizeOf(Wire));
+    const Uint = @Int(.unsigned, @bitSizeOf(Wire));
     const bits = reader.takeInt(Uint, .little) catch return error.EndOfStream;
     return @bitCast(bits);
 }
@@ -769,7 +770,7 @@ fn decodePrincipal(comptime T: type, reader: anytype, alloc: Allocator) DecodeEr
 fn decodeFunc(comptime T: type, reader: anytype, alloc: Allocator, entry: TypeEntry) DecodeError!T {
     if (comptime !t.isFuncType(T)) return error.TypeMismatch;
     // Validate annotation matches expected
-    if (entry.annotations != @intFromEnum(T.annotation)) return error.TypeMismatch;
+    if (entry.annotations != @backingInt(T.annotation)) return error.TypeMismatch;
     const flag = reader.takeByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
     const service = try decodePrincipalValue(reader, alloc);
@@ -888,12 +889,12 @@ fn decodeRecord(
     options: DecodeOptions,
     cycle_flags: []const bool,
 ) DecodeError!T {
-    const zig_fields = @typeInfo(T).@"struct".fields;
+    const zig = @typeInfo(T).@"struct";
     var result: T = undefined;
-    var found = [_]bool{false} ** zig_fields.len;
-    errdefer inline for (zig_fields, 0..) |zf, i| {
+    var found: [zig.field_names.len]bool = @splat(false);
+    errdefer inline for (zig.field_names, zig.field_types, 0..) |name, FieldType, i| {
         if (found[i]) {
-            freeDecoded(zf.type, alloc, @field(result, zf.name));
+            freeDecoded(FieldType, alloc, @field(result, name));
         }
     };
 
@@ -902,10 +903,10 @@ fn decodeRecord(
             if (cycle_flags[@intCast(wf.type_ref)]) return error.EndOfStream;
         }
         var matched = false;
-        inline for (zig_fields, 0..) |zf, i| {
-            const expected_id = comptime if (@typeInfo(T).@"struct".is_tuple) @as(u32, i) else t.fieldHash(zf.name);
+        inline for (zig.field_names, zig.field_types, 0..) |name, FieldType, i| {
+            const expected_id = comptime if (zig.is_tuple) @as(u32, i) else t.fieldHash(name);
             if (wf.hash == expected_id) {
-                @field(result, zf.name) = try decodeValue(zf.type, reader, table, wf.type_ref, alloc, data_len, options, cycle_flags);
+                @field(result, name) = try decodeValue(FieldType, reader, table, wf.type_ref, alloc, data_len, options, cycle_flags);
                 found[i] = true;
                 matched = true;
             }
@@ -915,13 +916,12 @@ fn decodeRecord(
         }
     }
 
-    inline for (zig_fields, 0..) |zf, i| {
+    inline for (zig.field_names, zig.field_types, zig.field_attrs, 0..) |name, FieldType, attrs, i| {
         if (!found[i]) {
-            if (comptime hasDefault(zf.type)) {
-                @field(result, zf.name) = defaultValue(zf.type);
-            } else if (zf.default_value_ptr) |ptr| {
-                const default: *const zf.type = @ptrCast(@alignCast(ptr));
-                @field(result, zf.name) = default.*;
+            if (comptime hasDefault(FieldType)) {
+                @field(result, name) = defaultValue(FieldType);
+            } else if (comptime attrs.defaultValue(FieldType)) |default| {
+                @field(result, name) = default;
             } else {
                 return error.MissingField;
             }
@@ -949,14 +949,15 @@ fn decodeVariant(
         if (cycle_flags[@intCast(active.type_ref)]) return error.EndOfStream;
     }
 
-    inline for (@typeInfo(T).@"union".fields) |uf| {
-        if (active.hash == comptime t.fieldHash(uf.name)) {
-            if (uf.type == void) {
+    const zig_union = @typeInfo(T).@"union";
+    inline for (zig_union.field_names, zig_union.field_types) |name, FieldType| {
+        if (active.hash == comptime t.fieldHash(name)) {
+            if (FieldType == void) {
                 if (wireOpcode(table, active.type_ref) != type_null)
                     return error.TypeMismatch;
-                return @unionInit(T, uf.name, {});
+                return @unionInit(T, name, {});
             } else {
-                return @unionInit(T, uf.name, try decodeValue(uf.type, reader, table, active.type_ref, alloc, data_len, options, cycle_flags));
+                return @unionInit(T, name, try decodeValue(FieldType, reader, table, active.type_ref, alloc, data_len, options, cycle_flags));
             }
         }
     }
@@ -1339,9 +1340,9 @@ test "skipValue validates utf8 in text without reader internals" {
     // Encode a record with a text field that gets skipped (wire has extra
     // field not in the Zig type). Use a 300-byte string to exercise the
     // chunked UTF-8 validation path (buffer is 256 bytes).
-    const long_text = "a" ** 300;
+    const long_text: [300]u8 = @splat('a');
     const Wire = struct { keep: u32, extra: []const u8 };
-    const bytes = try encode(testing.allocator, .{Wire{ .keep = 42, .extra = long_text }});
+    const bytes = try encode(testing.allocator, .{Wire{ .keep = 42, .extra = &long_text }});
     defer testing.allocator.free(bytes);
 
     // Decode as a struct missing the "extra" field. The text value is

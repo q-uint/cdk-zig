@@ -3,6 +3,9 @@ const base32 = @import("base32.zig");
 
 const allocator = @import("allocator.zig").default;
 
+// The checksum prefixed to a textual principal (IC interface spec).
+const Crc32 = std.hash.crc.@"CRC-32/ISO-HDLC";
+
 pub const Principal = []const u8;
 
 pub const managementCanister: Principal = &.{};
@@ -11,7 +14,7 @@ pub const anonymous: Principal = &.{0x04};
 pub fn encode(principal: Principal) []const u8 {
     const src = allocator.alloc(u8, 4 + principal.len) catch
         @panic("failed to allocate memory");
-    const crc = std.hash.crc.Crc32IsoHdlc.hash(principal);
+    const crc = Crc32.hash(principal);
     std.mem.writeInt(u32, src[0..4], crc, .big);
     @memcpy(src[4..], principal);
 
@@ -50,7 +53,7 @@ pub fn decode(text: []const u8) DecodeError!Principal {
 fn verifyChecksum(buf: []const u8) DecodeError!Principal {
     const checksum = std.mem.readInt(u32, buf[0..4], .big);
     const data = buf[4..];
-    const computed = std.hash.crc.Crc32IsoHdlc.hash(data);
+    const computed = Crc32.hash(data);
     if (checksum != computed) return error.InvalidChecksum;
     return data;
 }
@@ -83,7 +86,7 @@ fn comptimeEncodeLen(comptime n: usize) usize {
 
 pub fn comptimeEncode(comptime principal: []const u8) *const [comptimeEncodeLen(4 + principal.len)]u8 {
     comptime {
-        const crc = std.hash.crc.Crc32IsoHdlc.hash(principal);
+        const crc = Crc32.hash(principal);
         var src: [4 + principal.len]u8 = undefined;
         std.mem.writeInt(u32, src[0..4], crc, .big);
         @memcpy(src[4..], principal);
@@ -116,7 +119,7 @@ pub fn comptimeDecode(comptime text: []const u8) *const [strippedLen(text) * 5 /
             @compileError("invalid base32 character");
         const checksum = std.mem.readInt(u32, buf[0..4], .big);
         const result: [principal_len]u8 = buf[4..n][0..principal_len].*;
-        const computed = std.hash.crc.Crc32IsoHdlc.hash(&result);
+        const computed = Crc32.hash(&result);
         if (checksum != computed) {
             @compileError("invalid principal checksum");
         }
