@@ -9,12 +9,26 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 const ic0 = @import("ic0.zig");
+const root = @import("root");
 
 const allocator = @import("allocator.zig").default;
 
 pub const Raw = codec.Raw;
 
-pub const Error = error{CallPerformFailed};
+pub const Error = error{
+    CallPerformFailed,
+    TooManyCallsInFlight,
+};
+
+const options = if (@hasDecl(root, "cdk_options")) root.cdk_options else struct {};
+
+/// How many calls carrying pending state may be in flight per call site.
+/// Storage is static, so each such call site costs `capacity` slots of its
+/// own pending type. Override per call with `.capacity`.
+pub const default_capacity: u16 = if (@hasDecl(options, "call_capacity"))
+    options.call_capacity
+else
+    64;
 
 /// How a message execution ended.
 pub const Transition = enum(u8) {
@@ -75,6 +89,20 @@ pub fn forwardReject(rejection: Rejection) Transition {
     return reject(rejection.message);
 }
 
+// The default has to match onReply's arity, so it is generated against the
+// pending type rather than written once.
+fn defaultReject(comptime Pending: type) if (Pending == void)
+    fn (Rejection) Transition
+else
+    fn (Pending, Rejection) Transition {
+    if (Pending == void) return forwardReject;
+    return struct {
+        fn f(_: Pending, rejection: Rejection) Transition {
+            return reject(rejection.message);
+        }
+    }.f;
+}
+
 /// Send a call and end this message.
 ///
 /// `spec` is comptime, because a continuation's address is needed to name it
@@ -92,15 +120,37 @@ pub fn forwardReject(rejection: Rejection) Transition {
 ///
 ///     .callee    .method    .arg    .cycles    .timeout_seconds
 pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
-    comptime checkFields(@TypeOf(spec), &.{ "codec", "onReply", "onReject" });
+    comptime checkFields(@TypeOf(spec), &.{
+        "codec", "onReply", "onReject", "onFinish", "capacity",
+    });
     comptime checkFields(@TypeOf(request), &.{
-        "callee", "method", "arg", "cycles", "timeout_seconds",
+        "callee", "method", "arg", "pending", "cycles", "timeout_seconds",
     });
 
     const Spec = @TypeOf(spec);
+    const Request = @TypeOf(request);
     const Codec = if (@hasField(Spec, "codec")) spec.codec else codec.default;
-    const onReject = if (@hasField(Spec, "onReject")) spec.onReject else forwardReject;
-    const handlers = Handlers(Codec, spec.onReply, onReject);
+    const capacity = if (@hasField(Spec, "capacity")) spec.capacity else default_capacity;
+    const onReject = if (@hasField(Spec, "onReject"))
+        spec.onReject
+    else
+        defaultReject(shapeOf(spec.onReply, "onReply").Pending);
+
+    const onFinish = if (@hasField(Spec, "onFinish")) spec.onFinish else null;
+    const handlers = Handlers(Codec, spec.onReply, onReject, onFinish, capacity);
+
+    if (handlers.carries_pending != @hasField(Request, "pending")) {
+        @compileError(if (handlers.carries_pending)
+            "onReply takes pending state, so the request needs a .pending field"
+        else
+            "onReply takes no pending state, so .pending has nowhere to go");
+    }
+
+    const env: ic0.I = if (comptime handlers.carries_pending)
+        try handlers.put(request.pending)
+    else
+        0;
+    errdefer handlers.discard(env);
 
     ic0.call_new(
         request.callee.ptr,
@@ -108,10 +158,14 @@ pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
         request.method.ptr,
         @intCast(request.method.len),
         funcIdx(handlers.replyCallback),
-        0,
+        env,
         funcIdx(handlers.rejectCallback),
-        0,
+        env,
     );
+
+    if (handlers.carries_pending) {
+        ic0.call_on_cleanup(funcIdx(handlers.cleanupCallback), env);
+    }
 
     if (@hasField(@TypeOf(request), "arg")) {
         const payload = Codec.encode(@TypeOf(request.arg), request.arg);
@@ -131,48 +185,147 @@ pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
     return .sent;
 }
 
-fn replyType(comptime onReply: anytype) type {
-    const info = @typeInfo(@TypeOf(onReply));
-    if (info != .@"fn") @compileError("onReply must be a function");
-    if (info.@"fn".param_types.len != 1)
-        @compileError("onReply must take exactly one parameter, the decoded reply");
-    if (info.@"fn".return_type != Transition)
-        @compileError("onReply must return Transition");
-    return info.@"fn".param_types[0] orelse
-        @compileError("onReply may not take a generic parameter");
+const Shape = struct {
+    /// Pending state the continuation is handed back, `void` when it takes
+    /// none.
+    Pending: type,
+    /// The decoded reply, or `Rejection`.
+    Payload: type,
+
+    fn carriesPending(self: Shape) bool {
+        return self.Pending != void;
+    }
+};
+
+fn shapeOf(comptime handler: anytype, comptime name: []const u8) Shape {
+    const info = @typeInfo(@TypeOf(handler));
+    if (info != .@"fn") @compileError(name ++ " must be a function");
+
+    const f = info.@"fn";
+    if (f.return_type != Transition) @compileError(name ++ " must return Transition");
+
+    const generic = name ++ " may not take a generic parameter";
+    return switch (f.param_types.len) {
+        1 => .{ .Pending = void, .Payload = f.param_types[0] orelse @compileError(generic) },
+        2 => .{
+            .Pending = f.param_types[0] orelse @compileError(generic),
+            .Payload = f.param_types[1] orelse @compileError(generic),
+        },
+        else => @compileError(name ++ " takes the reply, optionally preceded by pending state"),
+    };
 }
 
-// The env word is unused. A continuation is a static function, so its table
-// index identifies it completely and there is no per-call state to keep.
+// Pending state lives in a fixed array inside this type, which is generated
+// per call site. The env word handed to ic0 is an index into it rather than a
+// pointer, so a callback arriving after an upgrade finds a zeroed slot and
+// traps deliberately instead of reading whatever now occupies that address.
 fn Handlers(
     comptime Codec: type,
     comptime onReply: anytype,
-    comptime onReject: fn (Rejection) Transition,
+    comptime onReject: anytype,
+    comptime onFinish: anytype,
+    comptime capacity: u16,
 ) type {
-    const Reply = replyType(onReply);
+    const shape = shapeOf(onReply, "onReply");
+    const Reply = shape.Payload;
+    const Pending = shape.Pending;
+
+    const reject_shape = shapeOf(onReject, "onReject");
+    if (reject_shape.Payload != Rejection)
+        @compileError("onReject's last parameter must be Rejection");
+    if (reject_shape.Pending != Pending)
+        @compileError("onReply and onReject must agree on the pending state type");
 
     return struct {
-        fn replyCallback(_: ic0.I) callconv(.c) void {
+        const carries_pending = shape.carriesPending();
+        const slot_count = if (carries_pending) capacity else 0;
+        var slots: [slot_count]?Pending = @splat(null);
+
+        fn put(value: Pending) Error!ic0.I {
+            for (&slots, 0..) |*slot, index| {
+                if (slot.* != null) continue;
+                slot.* = value;
+                return @intCast(index);
+            }
+            return Error.TooManyCallsInFlight;
+        }
+
+        fn take(env: ic0.I) Pending {
+            if (comptime !carries_pending) return {};
+            const index: usize = @intCast(env);
+            if (index >= slots.len) trap("cdk: callback slot out of range");
+            const value = slots[index] orelse
+                trap("cdk: callback for a released slot, upgraded mid-call?");
+            slots[index] = null;
+            return value;
+        }
+
+        // Pending state that declares a deinit owns something, so it is run
+        // on every exit: reply, reject, and the cleanup callback. Cleanup is
+        // the one canister code cannot reach, since only the CDK registers
+        // call_on_cleanup.
+        fn finish(value: Pending) void {
+            if (comptime !carries_pending) return;
+            if (comptime @TypeOf(onFinish) != @TypeOf(null)) onFinish(value);
+        }
+
+        // Used by the cleanup callback and by commit when the call never
+        // leaves. The slot is still occupied in both cases, so whatever it
+        // holds is finished here rather than dropped.
+        fn discard(env: ic0.I) void {
+            if (comptime !carries_pending) return;
+            const index: usize = @intCast(env);
+            if (index >= slots.len) return;
+            if (slots[index]) |value| {
+                slots[index] = null;
+                finish(value);
+            }
+        }
+
+        fn replyCallback(env: ic0.I) callconv(.c) void {
             beginMessage();
+            const pending = take(env);
             const size: usize = @intCast(ic0.msg_arg_data_size());
             const data = allocator.alloc(u8, size) catch
                 @panic("failed to allocate reply data");
             defer allocator.free(data);
             if (size > 0) ic0.msg_arg_data_copy(data.ptr, 0, @intCast(size));
-            checkOutcome(onReply(Codec.decode(Reply, data)));
+
+            const decoded = Codec.decode(Reply, data);
+            if (comptime carries_pending) {
+                defer finish(pending);
+                checkOutcome(onReply(pending, decoded));
+            } else {
+                checkOutcome(onReply(decoded));
+            }
         }
 
-        fn rejectCallback(_: ic0.I) callconv(.c) void {
+        fn rejectCallback(env: ic0.I) callconv(.c) void {
             beginMessage();
+            const pending = take(env);
             const size: usize = @intCast(ic0.msg_reject_msg_size());
             const message = allocator.alloc(u8, size) catch
                 @panic("failed to allocate reject message");
             defer allocator.free(message);
             if (size > 0) ic0.msg_reject_msg_copy(message.ptr, 0, @intCast(size));
-            checkOutcome(onReject(.{
+
+            const rejection = Rejection{
                 .code = @intCast(ic0.msg_reject_code()),
                 .message = message,
-            }));
+            };
+            if (comptime carries_pending) {
+                defer finish(pending);
+                checkOutcome(onReject(pending, rejection));
+            } else {
+                checkOutcome(onReject(rejection));
+            }
+        }
+
+        // Runs when a callback traps or the call context is deleted, the only
+        // cases where neither callback runs. Replying is not permitted here,
+        // so releasing the slot is all it can do.
+        fn cleanupCallback(env: ic0.I) callconv(.c) void {
+            discard(env);
         }
     };
 }

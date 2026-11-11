@@ -196,6 +196,91 @@ fn installPair(pocket: *pic.PocketIc) ![]const u8 {
     return caller_id;
 }
 
+fn greetingsFreed(pocket: *pic.PocketIc, caller_id: []const u8) !u32 {
+    const result = try pocket.queryCall(caller_id, pic.principal.anonymous, "greetings_freed", "");
+    switch (result) {
+        .reply => |data| {
+            defer allocator.free(data);
+            try std.testing.expectEqual(@as(usize, 4), data.len);
+            return std.mem.readInt(u32, data[0..4], .little);
+        },
+        .reject => |msg| {
+            defer allocator.free(msg);
+            return error.Rejected;
+        },
+    }
+}
+
+fn outstandingBytes(pocket: *pic.PocketIc, caller_id: []const u8) !u64 {
+    const result = try pocket.queryCall(caller_id, pic.principal.anonymous, "outstanding_bytes", "");
+    switch (result) {
+        .reply => |data| {
+            defer allocator.free(data);
+            try std.testing.expectEqual(@as(usize, 8), data.len);
+            return std.mem.readInt(u64, data[0..8], .little);
+        },
+        .reject => |msg| {
+            defer allocator.free(msg);
+            return error.Rejected;
+        },
+    }
+}
+
+test "a completed chained call leaves nothing allocated" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+    defer allocator.free(caller_id);
+
+    const before = try outstandingBytes(&pocket, caller_id);
+
+    const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_chained", "");
+    try expectReply(result, "hello from callee and goodbye from callee");
+
+    try std.testing.expectEqual(before, try outstandingBytes(&pocket, caller_id));
+}
+
+test "pending state is released when the call rejects" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+    defer allocator.free(caller_id);
+
+    try std.testing.expectEqual(@as(u32, 0), try greetingsFreed(&pocket, caller_id));
+
+    const result = try pocket.updateCall(
+        caller_id,
+        pic.principal.anonymous,
+        "call_chained_rejecting",
+        "",
+    );
+    const msg = try expectReject(result);
+    defer allocator.free(msg);
+
+    try std.testing.expectEqual(@as(u32, 1), try greetingsFreed(&pocket, caller_id));
+}
+
+test "pending state is released when the continuation traps" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+    defer allocator.free(caller_id);
+
+    const result = try pocket.updateCall(
+        caller_id,
+        pic.principal.anonymous,
+        "call_chained_trapping",
+        "",
+    );
+    const msg = try expectReject(result);
+    defer allocator.free(msg);
+
+    try std.testing.expectEqual(@as(u32, 1), try greetingsFreed(&pocket, caller_id));
+}
+
 test "a continuation can send the next call" {
     var pocket = try initPic();
     defer pocket.deinit();
