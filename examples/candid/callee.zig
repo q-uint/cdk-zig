@@ -1,21 +1,18 @@
+const std = @import("std");
 const cdk = @import("cdk");
-const candid = cdk.candid;
+const tr = cdk.transition;
+
+pub const cdk_codec = cdk.CandidCodec;
 
 const Greeting = struct {
     greeting: []const u8,
 };
 
-fn greet() void {
-    const name = candid.decode([]const u8, cdk.allocator, cdk.argData()) catch
-        @panic("failed to decode args");
+fn greet(name: []const u8) tr.Transition {
     const msg = std.fmt.allocPrint(cdk.allocator, "hello, {s}!", .{name}) catch
         @panic("failed to format greeting");
-    const reply = candid.encode(cdk.allocator, .{Greeting{ .greeting = msg }}) catch
-        @panic("failed to encode reply");
-    cdk.replyRaw(reply);
+    return tr.reply(Greeting{ .greeting = msg });
 }
-
-const std = @import("std");
 
 comptime {
     cdk.query(greet, "greet");

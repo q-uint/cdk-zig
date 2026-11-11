@@ -104,22 +104,42 @@ comptime {
 
 ### Inter-canister calls
 
-Make calls to other canisters with typed futures:
+A call commits canister state and ends the message. Its continuation runs as
+a separate message, so it is named up front rather than resumed inline:
 
 ```zig
 const cdk = @import("cdk");
+const tr = cdk.transition;
 
-fn callOther() void {
-    const callee = cdk.principal.comptimeEncode("aaaaa-aa");
-    var future = cdk.call.CallFuture(.raw, void).init(callee, "some_method");
-    future.setArg("hello");
-    future.onReply(struct {
-        fn f() void {
-            cdk.replyRaw(cdk.argData());
-        }
-    }.f);
-    future.enqueue() catch cdk.trap("call failed");
+fn replied(data: []const u8) tr.Transition {
+    return tr.replyRaw(data);
 }
+
+fn callOther() tr.Transition {
+    const callee = cdk.principal.comptimeEncode("aaaaa-aa");
+    return tr.call(callee, "some_method").arg("hello").commit(.{ .onReply = replied }) catch
+        tr.reject("call failed");
+}
+```
+
+`onReject` defaults to forwarding the callee's reject message on to your
+caller. Pass `.onReject` when you want to handle it yourself.
+
+`commit` returns a `Transition` that the entry point must return, so nothing
+can follow the call. Nothing is passed to the continuations either: state they
+need is re-read from the canister, because the commit means it may have
+changed underneath.
+
+Pass a codec to decode the reply into a type. Any format works that provides
+`encode(comptime T: type, value: T) []const u8` and
+`decode(comptime T: type, bytes: []const u8) T`:
+
+```zig
+fn replied(greeting: Greeting) tr.Transition { ... }
+
+return tr.callWith(cdk.CandidCodec, callee, "greet")
+    .arg(@as([]const u8, "world"))
+    .commit(.{ .onReply = replied }) catch tr.reject("call failed");
 ```
 
 ### Stable memory
@@ -146,37 +166,6 @@ fn restore() void {
 The `cdk.stable` module also provides streaming `Writer` and `Reader` types
 that handle page allocation automatically. Stable memory works identically
 on both wasm32 and wasm64 targets.
-
-### Async executor
-
-For complex multi-step call sequences, use poll-based state machines instead
-of nested callbacks:
-
-```zig
-const cdk = @import("cdk");
-
-const MyTask = struct {
-    state: enum { init, waiting, done } = .init,
-
-    fn poll(self: *MyTask, waker: cdk.executor.Waker) cdk.executor.PollResult {
-        switch (self.state) {
-            .init => {
-                var future = cdk.call.CallFuture(.raw, void).init(callee, "greet");
-                future.onWake(waker);
-                future.enqueue() catch return .ready;
-                self.state = .waiting;
-                return .pending;
-            },
-            .waiting => {
-                cdk.replyRaw(cdk.argData());
-                self.state = .done;
-                return .ready;
-            },
-            .done => return .ready,
-        }
-    }
-};
-```
 
 ### Candid encoding/decoding
 
@@ -256,7 +245,6 @@ The CDK provides two build-system functions importable via `@import("cdk")`:
 |---------|-------------|
 | [call](examples/call/) | Inter-canister calls with callback-based futures |
 | [candid](examples/candid/) | Candid-encoded arguments and replies |
-| [executor](examples/executor/) | Async task executor with poll-based state machines |
 | [timers](examples/timers/) | One-shot and repeating timer scheduling |
 | [stable](examples/stable/) | Stable memory persistence across upgrades |
 | [profiling](examples/profiling/) | Instruction profiling and flamegraph generation |

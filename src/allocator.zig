@@ -1,4 +1,4 @@
-// The allocator used by all CDK internals (cdk.zig, call.zig, principal.zig, etc.).
+// The allocator used by all CDK internals (cdk.zig, transition.zig, principal.zig, etc.).
 //
 // Override it by declaring `cdk_allocator` in your root source file:
 //

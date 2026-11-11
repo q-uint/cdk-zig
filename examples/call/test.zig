@@ -163,7 +163,7 @@ test "update non-existent method returns reject" {
     try std.testing.expect(msg.len > 0);
 }
 
-test "caller without callee principal traps on call_greet" {
+test "caller without callee principal rejects call_greet" {
     const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
     defer allocator.free(caller_wasm);
 
@@ -179,6 +179,32 @@ test "caller without callee principal traps on call_greet" {
     const msg = try expectReject(result);
     defer allocator.free(msg);
     try std.testing.expect(msg.len > 0);
+}
+
+fn installPair(pocket: *pic.PocketIc) ![]const u8 {
+    const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
+    defer allocator.free(callee_wasm);
+    const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
+    defer allocator.free(caller_wasm);
+
+    const callee_id = try pocket.createCanister();
+    defer allocator.free(callee_id);
+    try pocket.installCode(callee_id, callee_wasm, "", .install);
+
+    const caller_id = try pocket.createCanister();
+    try pocket.installCode(caller_id, caller_wasm, pic.principal.encode(callee_id), .install);
+    return caller_id;
+}
+
+test "call reaches its named continuation" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+    defer allocator.free(caller_id);
+
+    const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_greet", "");
+    try expectReply(result, "hello from callee");
 }
 
 test "caller calls non-existent canister" {

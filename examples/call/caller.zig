@@ -1,5 +1,5 @@
 const cdk = @import("cdk");
-const CallFuture = cdk.call.CallFuture;
+const tr = cdk.transition;
 
 var callee_principal: ?[]const u8 = null;
 
@@ -10,24 +10,15 @@ fn init() void {
         @panic("invalid principal");
 }
 
-fn call_greet() void {
-    const callee = callee_principal orelse {
-        cdk.trap("callee principal not set; pass it as init arg");
-        return;
-    };
-    const future = CallFuture.call(callee, "greet", "") catch {
-        cdk.trap("call_perform failed");
-        return;
-    };
+fn greetReplied(data: []const u8) tr.Transition {
+    return tr.replyRaw(data);
+}
 
-    future.onReply(struct {
-        fn f(result: CallFuture.Result) void {
-            switch (result) {
-                .reply => |data| cdk.replyRaw(data),
-                .reject => |r| cdk.trap(r.message),
-            }
-        }
-    }.f);
+fn call_greet() tr.Transition {
+    const callee = callee_principal orelse
+        return tr.reject("callee principal not set, pass it as init arg");
+    return tr.call(callee, "greet").commit(.{ .onReply = greetReplied }) catch
+        tr.reject("call_perform failed");
 }
 
 fn greet() void {

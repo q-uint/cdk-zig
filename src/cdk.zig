@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const principal = @import("principal.zig");
 pub const ic0 = @import("ic0.zig");
-pub const call = @import("call.zig");
+pub const transition = @import("transition.zig");
 pub const stable = @import("stable/stable.zig");
 pub const candid = @import("candid/candid.zig");
 const exp = @import("export.zig");
@@ -10,7 +10,6 @@ const exp = @import("export.zig");
 pub const cbor = @import("cbor.zig");
 pub const hash_tree = @import("hash_tree.zig");
 pub const timers = @import("timers.zig");
-pub const executor = @import("executor.zig");
 pub const profiling = @import("profiling.zig");
 
 pub const allocator = @import("allocator.zig").default;
@@ -26,10 +25,6 @@ pub const CandidCodec = struct {
             @panic("candid decode failed");
     }
 };
-
-pub fn CandidCallFuture(comptime Return: type) type {
-    return call.TypedCallFuture(CandidCodec, Return);
-}
 
 // Export decorators
 pub const init = exp.init;
