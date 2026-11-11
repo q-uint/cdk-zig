@@ -9,6 +9,10 @@ pub extern "ic0" fn msg_arg_data_size() I;
 pub extern "ic0" fn msg_arg_data_copy(dst: [*]const u8, offset: I, size: I) void;
 pub extern "ic0" fn msg_caller_size() I;
 pub extern "ic0" fn msg_caller_copy(dst: [*]const u8, offset: I, size: I) void;
+pub extern "ic0" fn msg_caller_info_data_size() I;
+pub extern "ic0" fn msg_caller_info_data_copy(dst: [*]const u8, offset: I, size: I) void;
+pub extern "ic0" fn msg_caller_info_signer_size() I;
+pub extern "ic0" fn msg_caller_info_signer_copy(dst: [*]const u8, offset: I, size: I) void;
 pub extern "ic0" fn msg_reject_code() i32;
 pub extern "ic0" fn msg_reject_msg_size() I;
 pub extern "ic0" fn msg_reject_msg_copy(dst: [*]const u8, offset: I, size: I) void;
@@ -38,6 +42,7 @@ pub extern "ic0" fn canister_version() i64;
 // Subnet info
 pub extern "ic0" fn subnet_self_size() I;
 pub extern "ic0" fn subnet_self_copy(dst: [*]const u8, offset: I, size: I) void;
+pub extern "ic0" fn subnet_self_node_count() i32;
 
 // Method name
 pub extern "ic0" fn msg_method_name_size() I;
@@ -107,6 +112,7 @@ pub extern "ic0" fn trap(src: [*]const u8, len: I) void;
 pub extern "ic0" fn cost_call(method_name_size: i64, payload_size: i64, dst: [*]const u8) void;
 pub extern "ic0" fn cost_create_canister(dst: [*]const u8) void;
 pub extern "ic0" fn cost_http_request(request_size: i64, max_response_bytes: i64, dst: [*]const u8) void;
+pub extern "ic0" fn cost_http_request_v2(params_src: [*]const u8, params_size: I, dst: [*]const u8) void;
 pub extern "ic0" fn cost_sign_with_ecdsa(key_name_src: [*]const u8, key_name_len: I, ecdsa_curve: i32, dst: [*]const u8) i32;
 pub extern "ic0" fn cost_sign_with_schnorr(key_name_src: [*]const u8, key_name_len: I, algorithm: i32, dst: [*]const u8) i32;
 pub extern "ic0" fn cost_vetkd_derive_key(key_name_src: [*]const u8, key_name_len: I, vetkd_curve: i32, dst: [*]const u8) i32;

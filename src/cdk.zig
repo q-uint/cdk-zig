@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const principal = @import("principal.zig");
 pub const ic0 = @import("ic0.zig");
+
+pub const ic0_spec = @import("ic0_spec.zig");
 pub const transition = @import("transition.zig");
 pub const stable = @import("stable/stable.zig");
 pub const candid = @import("candid/candid.zig");
