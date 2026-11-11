@@ -17,8 +17,10 @@ fn greetReplied(data: []const u8) tr.Transition {
 fn call_greet() tr.Transition {
     const callee = callee_principal orelse
         return tr.reject("callee principal not set, pass it as init arg");
-    return tr.call(callee, "greet").commit(.{ .onReply = greetReplied }) catch
-        tr.reject("call_perform failed");
+    return tr.commit(
+        .{ .onReply = greetReplied },
+        .{ .callee = callee, .method = "greet" },
+    ) catch tr.reject("call_perform failed");
 }
 
 fn greet() void {

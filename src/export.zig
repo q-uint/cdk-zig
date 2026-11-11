@@ -1,16 +1,10 @@
-const root = @import("root");
 const ic0 = @import("ic0.zig");
 const ic0_spec = @import("ic0_spec.zig");
 const profiling = @import("profiling.zig");
-const transition = @import("transition.zig");
 
 const allocator = @import("allocator.zig").default;
 
-/// Wire format for entry point arguments. Declare `cdk_codec` in your root
-/// source file to use something other than raw bytes:
-///
-///     pub const cdk_codec = cdk.CandidCodec;
-pub const codec = if (@hasDecl(root, "cdk_codec")) root.cdk_codec else transition.Raw;
+const codec = @import("codec.zig").default;
 
 pub fn init(comptime func: anytype) void {
     @export(&callConvWrapper(profiling.traced(normalize(func, .I), "canister_init")), .{ .name = "canister_init" });

@@ -2,6 +2,8 @@ const cdk = @import("cdk");
 const candid = cdk.candid;
 const tr = cdk.transition;
 
+pub const cdk_codec = cdk.CandidCodec;
+
 var callee_principal: ?[]const u8 = null;
 
 fn init() void {
@@ -24,10 +26,11 @@ fn greetReplied(greeting: Greeting) tr.Transition {
 fn call_greet() tr.Transition {
     const callee = callee_principal orelse
         return tr.reject("callee principal not set, pass it as init arg");
-    return tr.callWith(cdk.CandidCodec, callee, "greet")
-        .arg(@as([]const u8, "world"))
-        .commit(.{ .onReply = greetReplied }) catch
-        tr.reject("call_perform failed");
+    return tr.commit(.{ .onReply = greetReplied }, .{
+        .callee = callee,
+        .method = "greet",
+        .arg = @as([]const u8, "world"),
+    }) catch tr.reject("call_perform failed");
 }
 
 comptime {

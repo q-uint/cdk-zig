@@ -38,6 +38,7 @@ pub fn allows(comptime name: []const u8, comptime context: Context) bool {
 // Counted first so the result can be filled into a fixed array. Growing with
 // `++` would recopy the whole slice on every line.
 fn parseAll() []const Entry {
+    @setEvalBranchQuota(2_000_000);
     var out: [countEntryLines()]Entry = undefined;
     var i: usize = 0;
     var it = std.mem.splitScalar(u8, @embedFile("ic0.spec"), '\n');
@@ -51,6 +52,7 @@ fn parseAll() []const Entry {
 }
 
 fn countEntryLines() usize {
+    @setEvalBranchQuota(2_000_000);
     var count: usize = 0;
     var it = std.mem.splitScalar(u8, @embedFile("ic0.spec"), '\n');
     while (it.next()) |line| {
@@ -152,18 +154,19 @@ const every_context: []const Context = &.{
     .I, .G, .U, .RQ, .NRQ, .TQ, .CQ, .Ry, .Rt, .CRy, .CRt, .C, .CC, .F, .T,
 };
 
+// The legend does not list a bare Q, but msg_deadline is annotated with one.
+// Its prose puts the call in "all calls to query and composite query methods,
+// including calls in replicated mode", and CQ appears separately on that same
+// line, so Q is the query methods.
+const query_contexts: []const Context = &.{ .RQ, .NRQ, .TQ };
+
 fn splitContexts(comptime text: []const u8) []const Context {
     var out: [countContexts(text)]Context = undefined;
     var i: usize = 0;
     var it = std.mem.tokenizeAny(u8, text, " \t");
     while (it.next()) |token| {
-        if (std.mem.eql(u8, token, "*")) {
-            for (every_context) |context| {
-                out[i] = context;
-                i += 1;
-            }
-        } else {
-            out[i] = toContext(token);
+        for (expand(token)) |context| {
+            out[i] = context;
             i += 1;
         }
     }
@@ -175,9 +178,15 @@ fn countContexts(comptime text: []const u8) usize {
     var count: usize = 0;
     var it = std.mem.tokenizeAny(u8, text, " \t");
     while (it.next()) |token| {
-        count += if (std.mem.eql(u8, token, "*")) every_context.len else 1;
+        count += expand(token).len;
     }
     return count;
+}
+
+fn expand(comptime token: []const u8) []const Context {
+    if (std.mem.eql(u8, token, "*")) return every_context;
+    if (std.mem.eql(u8, token, "Q")) return query_contexts;
+    return &.{toContext(token)};
 }
 
 fn toContext(comptime token: []const u8) Context {

@@ -7,9 +7,12 @@
 //! can follow it, and nothing is carried across the commit.
 
 const std = @import("std");
+const codec = @import("codec.zig");
 const ic0 = @import("ic0.zig");
 
 const allocator = @import("allocator.zig").default;
+
+pub const Raw = codec.Raw;
 
 pub const Error = error{CallPerformFailed};
 
@@ -25,21 +28,6 @@ pub const Rejection = struct {
     message: []const u8,
 };
 
-/// Wire format for a call's argument and reply. Any format works, Candid,
-/// CBOR, protobuf, as long as it provides these two:
-///
-///     fn encode(comptime T: type, value: T) []const u8
-///     fn decode(comptime T: type, bytes: []const u8) T
-pub const Raw = struct {
-    pub fn encode(comptime _: type, value: []const u8) []const u8 {
-        return value;
-    }
-
-    pub fn decode(comptime _: type, bytes: []const u8) []const u8 {
-        return bytes;
-    }
-};
-
 pub fn replyRaw(payload: []const u8) Transition {
     if (payload.len != 0) {
         ic0.msg_reply_data_append(payload.ptr, @intCast(payload.len));
@@ -51,10 +39,7 @@ pub fn replyRaw(payload: []const u8) Transition {
 /// Reply with a value encoded by the canister's `cdk_codec`, the same format
 /// entry point arguments are decoded with.
 pub fn reply(value: anytype) Transition {
-    // Imported here rather than at the top because export.zig imports this
-    // file for its default codec.
-    const codec = @import("export.zig").codec;
-    return replyRaw(codec.encode(@TypeOf(value), value));
+    return replyRaw(codec.default.encode(@TypeOf(value), value));
 }
 
 /// Reply with a value in a format other than the canister's `cdk_codec`.
@@ -72,87 +57,55 @@ pub fn forwardReject(rejection: Rejection) Transition {
     return reject(rejection.message);
 }
 
-pub fn call(callee: []const u8, method: []const u8) Call(Raw) {
-    return .{ .callee = callee, .method = method };
-}
+/// Send a call and end this message.
+///
+/// `spec` is comptime, because a continuation's address is needed to name it
+/// to the system:
+///
+///     .codec     wire format, defaults to Raw
+///     .onReply   fn (Reply) Transition
+///     .onReject  fn (Rejection) Transition, defaults to forwardReject
+///
+/// `request` is runtime:
+///
+///     .callee    .method    .arg    .cycles    .timeout_seconds
+pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
+    comptime checkFields(@TypeOf(spec), &.{ "codec", "onReply", "onReject" });
+    comptime checkFields(@TypeOf(request), &.{
+        "callee", "method", "arg", "cycles", "timeout_seconds",
+    });
 
-pub fn callWith(comptime Codec: type, callee: []const u8, method: []const u8) Call(Codec) {
-    return .{ .callee = callee, .method = method };
-}
+    const Spec = @TypeOf(spec);
+    const Codec = if (@hasField(Spec, "codec")) spec.codec else codec.default;
+    const onReject = if (@hasField(Spec, "onReject")) spec.onReject else forwardReject;
+    const handlers = Handlers(Codec, spec.onReply, onReject);
 
-pub fn Call(comptime Codec: type) type {
-    return struct {
-        callee: []const u8,
-        method: []const u8,
-        payload: []const u8 = &.{},
-        cycles: u128 = 0,
-        timeout_seconds: ?u32 = null,
+    ic0.call_new(
+        request.callee.ptr,
+        @intCast(request.callee.len),
+        request.method.ptr,
+        @intCast(request.method.len),
+        funcIdx(handlers.replyCallback),
+        0,
+        funcIdx(handlers.rejectCallback),
+        0,
+    );
 
-        const Self = @This();
+    if (@hasField(@TypeOf(request), "arg")) {
+        const payload = Codec.encode(@TypeOf(request.arg), request.arg);
+        if (payload.len > 0) ic0.call_data_append(payload.ptr, @intCast(payload.len));
+    }
+    if (@hasField(@TypeOf(request), "cycles")) {
+        const high: i64 = @bitCast(@as(u64, @truncate(request.cycles >> 64)));
+        const low: i64 = @bitCast(@as(u64, @truncate(request.cycles)));
+        ic0.call_cycles_add128(high, low);
+    }
+    if (@hasField(@TypeOf(request), "timeout_seconds")) {
+        ic0.call_with_best_effort_response(@intCast(request.timeout_seconds));
+    }
 
-        pub fn arg(self: Self, value: anytype) Self {
-            var next = self;
-            next.payload = Codec.encode(@TypeOf(value), value);
-            return next;
-        }
-
-        pub fn withCycles(self: Self, amount: u128) Self {
-            var next = self;
-            next.cycles = amount;
-            return next;
-        }
-
-        pub fn withTimeout(self: Self, seconds: u32) Self {
-            var next = self;
-            next.timeout_seconds = seconds;
-            return next;
-        }
-
-        /// Send the call and end this message. The continuations are named
-        /// here because there is no way to resume at the next statement:
-        ///
-        ///     .commit(.{ .onReply = replied })
-        ///     .commit(.{ .onReply = replied, .onReject = rejected })
-        ///
-        /// `onReject` defaults to `forwardReject`.
-        ///
-        /// Nothing is passed to them. State they need must be re-read from
-        /// the canister, since the commit means it may have moved underneath.
-        pub fn commit(self: Self, comptime continuations: anytype) Error!Transition {
-            const C = @TypeOf(continuations);
-            const onReject = if (@hasField(C, "onReject"))
-                continuations.onReject
-            else
-                forwardReject;
-            const handlers = Handlers(Codec, continuations.onReply, onReject);
-
-            ic0.call_new(
-                self.callee.ptr,
-                @intCast(self.callee.len),
-                self.method.ptr,
-                @intCast(self.method.len),
-                funcIdx(handlers.replyCallback),
-                0,
-                funcIdx(handlers.rejectCallback),
-                0,
-            );
-
-            if (self.payload.len > 0) {
-                ic0.call_data_append(self.payload.ptr, @intCast(self.payload.len));
-            }
-            if (self.cycles > 0) {
-                const high: i64 = @bitCast(@as(u64, @truncate(self.cycles >> 64)));
-                const low: i64 = @bitCast(@as(u64, @truncate(self.cycles)));
-                ic0.call_cycles_add128(high, low);
-            }
-            if (self.timeout_seconds) |seconds| {
-                ic0.call_with_best_effort_response(@intCast(seconds));
-            }
-
-            if (ic0.call_perform() != 0) return Error.CallPerformFailed;
-            return .sent;
-        }
-    };
+    if (ic0.call_perform() != 0) return Error.CallPerformFailed;
+    return .sent;
 }
 
 fn replyType(comptime onReply: anytype) type {
@@ -201,4 +154,20 @@ fn Handlers(
 
 fn funcIdx(comptime f: anytype) ic0.I {
     return @intCast(@intFromPtr(&f));
+}
+
+fn checkFields(comptime T: type, comptime known: []const []const u8) void {
+    for (@typeInfo(T).@"struct".field_names) |given| {
+        for (known) |name| {
+            if (std.mem.eql(u8, given, name)) break;
+        } else @compileError("unknown field ." ++ given ++ ", expected one of " ++ joinNames(known));
+    }
+}
+
+fn joinNames(comptime names: []const []const u8) []const u8 {
+    var out: []const u8 = "";
+    for (names, 0..) |name, i| {
+        out = out ++ (if (i == 0) "" else ", ") ++ name;
+    }
+    return out;
 }
