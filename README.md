@@ -117,10 +117,17 @@ fn replied(data: []const u8) tr.Transition {
 
 fn callOther() tr.Transition {
     const callee = cdk.principal.comptimeEncode("aaaaa-aa");
-    return tr.call(callee, "some_method").arg("hello").commit(.{ .onReply = replied }) catch
-        tr.reject("call failed");
+    return tr.commit(.{ .onReply = replied }, .{
+        .callee = callee,
+        .method = "some_method",
+        .arg = "hello",
+    }) catch tr.reject("call failed");
 }
 ```
+
+The first struct is comptime, because a continuation's address is needed to
+name it to the system. The second is the call itself, and also takes
+`.cycles` and `.timeout_seconds`.
 
 `onReject` defaults to forwarding the callee's reject message on to your
 caller. Pass `.onReject` when you want to handle it yourself.
@@ -130,17 +137,27 @@ can follow the call. Nothing is passed to the continuations either: state they
 need is re-read from the canister, because the commit means it may have
 changed underneath.
 
-Pass a codec to decode the reply into a type. Any format works that provides
-`encode(comptime T: type, value: T) []const u8` and
+Declare a codec to encode arguments and decode replies into types. Any format
+works that provides `encode(comptime T: type, value: T) []const u8` and
 `decode(comptime T: type, bytes: []const u8) T`:
 
 ```zig
-fn replied(greeting: Greeting) tr.Transition { ... }
+pub const cdk_codec = cdk.CandidCodec;
 
-return tr.callWith(cdk.CandidCodec, callee, "greet")
-    .arg(@as([]const u8, "world"))
-    .commit(.{ .onReply = replied }) catch tr.reject("call failed");
+fn replied(greeting: Greeting) tr.Transition {
+    return tr.reply(greeting);
+}
+
+return tr.commit(.{ .onReply = replied }, .{
+    .callee = callee,
+    .method = "greet",
+    .arg = @as([]const u8, "world"),
+}) catch tr.reject("call failed");
 ```
+
+`cdk_codec` covers entry point arguments, replies and calls alike. Pass
+`.codec` in the first struct to override it for one call, for a canister that
+talks to peers using different formats.
 
 ### Stable memory
 

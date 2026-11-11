@@ -128,16 +128,14 @@ pub fn acceptMessage() void {
     ic0.accept_message();
 }
 
-// Message output
+// Message output, for entry points with no transition to state. Entry points
+// that make a call use the transition module's versions, which return one.
 pub fn replyRaw(msg: []const u8) void {
-    if (msg.len != 0) {
-        ic0.msg_reply_data_append(msg.ptr, @intCast(msg.len));
-    }
-    ic0.msg_reply();
+    _ = transition.replyRaw(msg);
 }
 
 pub fn reject(msg: []const u8) void {
-    ic0.msg_reject(msg.ptr, @intCast(msg.len));
+    _ = transition.reject(msg);
 }
 
 // Cycles (message-level)

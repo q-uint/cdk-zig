@@ -28,6 +28,24 @@ pub const Rejection = struct {
     message: []const u8,
 };
 
+var call_performed: bool = false;
+
+/// Called by the generated entry points and callbacks, not by canister code.
+pub fn beginMessage() void {
+    call_performed = false;
+}
+
+/// Called by the generated entry points and callbacks, not by canister code.
+/// A message that sent a call must end by returning that call's Transition,
+/// or its continuation will arrive and respond a second time.
+pub fn checkOutcome(outcome: ?Transition) void {
+    if (!call_performed) return;
+    const settled = outcome orelse
+        trap("cdk: an entry point returning void sent a call, it must return a Transition");
+    if (settled != .sent)
+        trap("cdk: a call was sent but its Transition was not returned");
+}
+
 pub fn replyRaw(payload: []const u8) Transition {
     if (payload.len != 0) {
         ic0.msg_reply_data_append(payload.ptr, @intCast(payload.len));
@@ -65,6 +83,10 @@ pub fn forwardReject(rejection: Rejection) Transition {
 ///     .codec     wire format, defaults to Raw
 ///     .onReply   fn (Reply) Transition
 ///     .onReject  fn (Rejection) Transition, defaults to forwardReject
+///
+/// A continuation borrows its reply or rejection for the duration of the
+/// call. The buffer is freed when it returns, so anything kept beyond that
+/// must be copied.
 ///
 /// `request` is runtime:
 ///
@@ -105,6 +127,7 @@ pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
     }
 
     if (ic0.call_perform() != 0) return Error.CallPerformFailed;
+    call_performed = true;
     return .sent;
 }
 
@@ -130,26 +153,33 @@ fn Handlers(
 
     return struct {
         fn replyCallback(_: ic0.I) callconv(.c) void {
+            beginMessage();
             const size: usize = @intCast(ic0.msg_arg_data_size());
             const data = allocator.alloc(u8, size) catch
                 @panic("failed to allocate reply data");
             defer allocator.free(data);
             if (size > 0) ic0.msg_arg_data_copy(data.ptr, 0, @intCast(size));
-            _ = onReply(Codec.decode(Reply, data));
+            checkOutcome(onReply(Codec.decode(Reply, data)));
         }
 
         fn rejectCallback(_: ic0.I) callconv(.c) void {
+            beginMessage();
             const size: usize = @intCast(ic0.msg_reject_msg_size());
             const message = allocator.alloc(u8, size) catch
                 @panic("failed to allocate reject message");
             defer allocator.free(message);
             if (size > 0) ic0.msg_reject_msg_copy(message.ptr, 0, @intCast(size));
-            _ = onReject(.{
+            checkOutcome(onReject(.{
                 .code = @intCast(ic0.msg_reject_code()),
                 .message = message,
-            });
+            }));
         }
     };
+}
+
+fn trap(message: []const u8) noreturn {
+    ic0.trap(message.ptr, @intCast(message.len));
+    unreachable;
 }
 
 fn funcIdx(comptime f: anytype) ic0.I {

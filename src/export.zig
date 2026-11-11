@@ -1,6 +1,7 @@
 const ic0 = @import("ic0.zig");
 const ic0_spec = @import("ic0_spec.zig");
 const profiling = @import("profiling.zig");
+const transition = @import("transition.zig");
 
 const allocator = @import("allocator.zig").default;
 
@@ -58,11 +59,16 @@ comptime {
 fn normalize(comptime func: anytype, comptime context: ic0_spec.Context) fn () void {
     const info = @typeInfo(@TypeOf(func)).@"fn";
 
+    const returns_void = info.return_type == void;
+
     if (info.param_types.len == 0) {
-        if (info.return_type == void) return func;
         return struct {
             fn f() void {
-                _ = func();
+                transition.beginMessage();
+                transition.checkOutcome(if (returns_void) blk: {
+                    func();
+                    break :blk null;
+                } else func());
             }
         }.f;
     }
@@ -82,12 +88,18 @@ fn normalize(comptime func: anytype, comptime context: ic0_spec.Context) fn () v
 
     return struct {
         fn f() void {
+            transition.beginMessage();
             const size: usize = @intCast(ic0.msg_arg_data_size());
             const data = allocator.alloc(u8, size) catch
                 @panic("failed to allocate argument data");
             defer allocator.free(data);
             if (size > 0) ic0.msg_arg_data_copy(data.ptr, 0, @intCast(size));
-            _ = func(codec.decode(Arg, data));
+
+            const arg = codec.decode(Arg, data);
+            transition.checkOutcome(if (returns_void) blk: {
+                func(arg);
+                break :blk null;
+            } else func(arg));
         }
     }.f;
 }

@@ -196,6 +196,17 @@ fn installPair(pocket: *pic.PocketIc) ![]const u8 {
     return caller_id;
 }
 
+test "a continuation can send the next call" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+    defer allocator.free(caller_id);
+
+    const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_chained", "");
+    try expectReply(result, "hello from callee and goodbye from callee");
+}
+
 test "call reaches its named continuation" {
     var pocket = try initPic();
     defer pocket.deinit();
