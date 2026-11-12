@@ -18,29 +18,25 @@ const expectDecodeManyError = lib.expectDecodeManyError;
 test "reference: principal ic0" {
     const bytes = "DIDL" ++ &[_]u8{ 0x00, 0x01, 0x68, 0x01, 0x00 };
     const val = try decode(Principal, testing.allocator, bytes);
-    defer testing.allocator.free(val.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{}, val.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{}, val.slice());
 }
 
 test "reference: principal 3 bytes" {
     const bytes = "DIDL" ++ &[_]u8{ 0x00, 0x01, 0x68, 0x01, 0x03, 0xca, 0xff, 0xee };
     const val = try decode(Principal, testing.allocator, bytes);
-    defer testing.allocator.free(val.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.slice());
 }
 
 test "reference: principal 9 bytes" {
     const bytes = "DIDL" ++ &[_]u8{ 0x00, 0x01, 0x68, 0x01, 0x09, 0xef, 0xcd, 0xab, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
     const val = try decode(Principal, testing.allocator, bytes);
-    defer testing.allocator.free(val.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xef, 0xcd, 0xab, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 }, val.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xef, 0xcd, 0xab, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 }, val.slice());
 }
 
 test "reference: principal anonymous" {
     const bytes = "DIDL" ++ &[_]u8{ 0x00, 0x01, 0x68, 0x01, 0x01, 0x04 };
     const val = try decode(Principal, testing.allocator, bytes);
-    defer testing.allocator.free(val.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{0x04}, val.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{0x04}, val.slice());
 }
 
 test "reference: principal no tag" {
@@ -73,9 +69,8 @@ test "reference: func basic" {
         0x01, 0x61, // method name "a"
     };
     const val = try decode(Func, testing.allocator, bytes);
-    defer testing.allocator.free(val.service.bytes);
     defer testing.allocator.free(val.method);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.slice());
     try testing.expectEqualStrings("a", val.method);
 }
 
@@ -88,9 +83,8 @@ test "reference: func with args" {
         0xff, 0xee, 0x03,
     } ++ "foo";
     const val = try decode(Func, testing.allocator, bytes);
-    defer testing.allocator.free(val.service.bytes);
     defer testing.allocator.free(val.method);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.slice());
     try testing.expectEqualStrings("foo", val.method);
 }
 
@@ -120,8 +114,7 @@ test "reference: func wrong tag" {
 test "reference: service basic" {
     // service "w7x7r-cok77-xa" : (service {})
     const val = try decode(Service, testing.allocator, comptime x("DIDL\\01\\69\\00\\01\\00\\01\\03\\ca\\ff\\ee"));
-    defer testing.allocator.free(val.principal.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.slice());
 }
 
 test "reference: service with methods" {
@@ -129,8 +122,7 @@ test "reference: service with methods" {
     const val = try decode(Service, testing.allocator, comptime x(
         "DIDL\\02\\6a\\01\\71\\01\\7d\\00\\69\\01\\03foo\\00\\01\\01\\01\\03\\ca\\ff\\ee",
     ));
-    defer testing.allocator.free(val.principal.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.slice());
 }
 
 // -- additional principal tests --
@@ -139,10 +131,9 @@ test "reference: principal different bytes" {
     // Same blob as principal 3 bytes but only 2 bytes -> different principal
     const bytes = "DIDL" ++ &[_]u8{ 0x00, 0x01, 0x68, 0x01, 0x02, 0xca, 0xff };
     const val = try decode(Principal, testing.allocator, bytes);
-    defer testing.allocator.free(val.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff }, val.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff }, val.slice());
     // Not equal to the 3-byte principal
-    try testing.expect(!std.mem.eql(u8, val.bytes, &[_]u8{ 0xca, 0xff, 0xee }));
+    try testing.expect(!std.mem.eql(u8, val.slice(), &[_]u8{ 0xca, 0xff, 0xee }));
 }
 
 test "reference: principal too long" {
@@ -188,8 +179,7 @@ test "reference: service with two methods" {
         "DIDL\\02\\6a\\01\\71\\01\\7d\\00\\69\\02\\03foo\\00\\04foo\\32\\00\\01\\01\\01\\03\\ca\\ff\\ee",
     );
     const val = try decode(Service, testing.allocator, bytes);
-    defer testing.allocator.free(val.principal.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.slice());
 }
 
 test "reference: service decodes at service {}" {
@@ -198,8 +188,7 @@ test "reference: service decodes at service {}" {
         "DIDL\\02\\6a\\01\\71\\01\\7d\\00\\69\\01\\03foo\\00\\01\\01\\01\\03\\ca\\ff\\ee",
     );
     const val = try decode(Service, testing.allocator, bytes);
-    defer testing.allocator.free(val.principal.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.slice());
 }
 
 test "reference: service unicode" {
@@ -207,8 +196,7 @@ test "reference: service unicode" {
         "DIDL\\05i\\02\\03foo\\01\\04\\f0\\9f\\90\\82\\02j\\00\\00\\01\\02j\\01\\03\\01\\04\\01\\01n|l\\00\\01\\00\\01\\00",
     );
     const val = try decode(Service, testing.allocator, bytes);
-    defer testing.allocator.free(val.principal.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{}, val.principal.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{}, val.principal.slice());
 }
 
 test "reference: service invalid unicode" {
@@ -240,9 +228,8 @@ test "reference: func query" {
         0xee, 0x03,
     } ++ "foo";
     const val = try decode(QueryFunc, testing.allocator, bytes);
-    defer testing.allocator.free(val.service.bytes);
     defer testing.allocator.free(val.method);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.slice());
     try testing.expectEqualStrings("foo", val.method);
 }
 
@@ -255,9 +242,8 @@ test "reference: func composite query" {
         0xee, 0x03,
     } ++ "foo";
     const val = try decode(CQFunc, testing.allocator, bytes);
-    defer testing.allocator.free(val.service.bytes);
     defer testing.allocator.free(val.method);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.service.slice());
     try testing.expectEqualStrings("foo", val.method);
 }
 
@@ -268,9 +254,8 @@ test "reference: func unicode" {
         "DIDL\\02j\\02|}\\01\\01\\01\\01i\\00\\01\\00\\01\\01\\00\\04\\f0\\9f\\90\\82",
     );
     const val = try decode(QueryFunc, testing.allocator, bytes);
-    defer testing.allocator.free(val.service.bytes);
     defer testing.allocator.free(val.method);
-    try testing.expectEqualSlices(u8, &[_]u8{}, val.service.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{}, val.service.slice());
     try testing.expectEqualStrings("\xf0\x9f\x90\x82", val.method);
 }
 
@@ -454,8 +439,7 @@ test "reference: service { foo } decodes at service {}" {
     const val = try decode(Service, testing.allocator, comptime x(
         "DIDL\\02\\6a\\01\\71\\01\\7d\\00\\69\\01\\03foo\\00\\01\\01\\01\\03\\ca\\ff\\ee",
     ));
-    defer testing.allocator.free(val.principal.bytes);
-    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.bytes);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xff, 0xee }, val.principal.slice());
 }
 
 test "reference: func () -> () !<: func (text) -> (nat)" {

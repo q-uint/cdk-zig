@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
         "src/principal.zig",
         "src/pocket_ic.zig",
         "src/stable/stable.zig",
-        "src/candid/candid.zig",
+        "src/candid_tests.zig",
         "src/cbor.zig",
         "src/hash_tree.zig",
     };

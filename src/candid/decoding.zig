@@ -63,17 +63,11 @@ pub fn decodeOwnedAdvanced(comptime T: type, alloc: Allocator, data: []const u8,
 }
 
 pub fn freeDecoded(comptime T: type, alloc: Allocator, val: T) void {
-    if (T == t.Principal) {
-        alloc.free(val.bytes);
-        return;
-    }
+    // A principal owns its bytes inline, so there is nothing to release for
+    // Principal or for the principal inside a Service.
+    if (T == t.Principal or T == t.Service) return;
     if (comptime t.isFuncType(T)) {
-        alloc.free(val.service.bytes);
         alloc.free(val.method);
-        return;
-    }
-    if (T == t.Service) {
-        alloc.free(val.principal.bytes);
         return;
     }
     if (T == t.Blob) {
@@ -762,9 +756,9 @@ fn decodeText(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T
     return buf;
 }
 
-fn decodePrincipal(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {
+fn decodePrincipal(comptime T: type, reader: anytype, _: Allocator) DecodeError!T {
     if (T != t.Principal) return error.TypeMismatch;
-    return decodePrincipalValue(reader, alloc);
+    return decodePrincipalValue(reader);
 }
 
 fn decodeFunc(comptime T: type, reader: anytype, alloc: Allocator, entry: TypeEntry) DecodeError!T {
@@ -773,8 +767,7 @@ fn decodeFunc(comptime T: type, reader: anytype, alloc: Allocator, entry: TypeEn
     if (entry.annotations != @backingInt(T.annotation)) return error.TypeMismatch;
     const flag = reader.takeByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
-    const service = try decodePrincipalValue(reader, alloc);
-    errdefer alloc.free(service.bytes);
+    const service = try decodePrincipalValue(reader);
     const mlen = reader.takeLeb128(u32) catch |e| return mapLebError(e);
     const mbuf = alloc.alloc(u8, mlen) catch return error.OutOfMemory;
     errdefer alloc.free(mbuf);
@@ -782,25 +775,29 @@ fn decodeFunc(comptime T: type, reader: anytype, alloc: Allocator, entry: TypeEn
     return .{ .service = service, .method = mbuf };
 }
 
-fn decodeService(comptime T: type, reader: anytype, alloc: Allocator) DecodeError!T {
+fn decodeService(comptime T: type, reader: anytype, _: Allocator) DecodeError!T {
     if (T != t.Service) return error.TypeMismatch;
-    const flag = reader.takeByte() catch return error.EndOfStream;
-    if (flag != 1) return error.UnsupportedPrincipalRef;
-    const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
-    const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
-    errdefer alloc.free(buf);
-    reader.readSliceAll(buf) catch return error.EndOfStream;
-    return .{ .principal = .{ .bytes = buf } };
+    return .{ .principal = try decodePrincipalValue(reader) };
 }
 
-fn decodePrincipalValue(reader: anytype, alloc: Allocator) DecodeError!t.Principal {
+// A principal owns its bytes inline, so nothing is allocated here and
+// freeDecoded has nothing to release.
+fn decodePrincipalValue(reader: anytype) DecodeError!t.Principal {
     const flag = reader.takeByte() catch return error.EndOfStream;
     if (flag != 1) return error.UnsupportedPrincipalRef;
     const len = reader.takeLeb128(u32) catch |e| return mapLebError(e);
-    const buf = alloc.alloc(u8, len) catch return error.OutOfMemory;
-    errdefer alloc.free(buf);
-    reader.readSliceAll(buf) catch return error.EndOfStream;
-    return .{ .bytes = buf };
+
+    // A length beyond the maximum is only rejected as a bad principal once
+    // the bytes are known to be there. Otherwise a truncated message would
+    // report the wrong error, since an overshooting length is truncation.
+    if (len > t.Principal.max_bytes) {
+        reader.discardAll(len) catch return error.EndOfStream;
+        return error.UnsupportedPrincipalRef;
+    }
+
+    var p = t.Principal{ .len = @intCast(len) };
+    reader.readSliceAll(p.raw[0..len]) catch return error.EndOfStream;
+    return p;
 }
 
 fn decodeCompound(comptime T: type, reader: anytype, table: []const TypeEntry, entry: TypeEntry, alloc: Allocator, data_len: usize, options: DecodeOptions, cycle_flags: []const bool) DecodeError!T {
@@ -1172,8 +1169,7 @@ test "round-trip principal" {
     const bytes = try encode(testing.allocator, .{t.Principal.from(&id)});
     defer testing.allocator.free(bytes);
     const decoded = try decode(t.Principal, testing.allocator, bytes);
-    defer testing.allocator.free(decoded.bytes);
-    try testing.expectEqualSlices(u8, &id, decoded.bytes);
+    try testing.expectEqualSlices(u8, &id, decoded.slice());
 }
 
 test "round-trip blob" {

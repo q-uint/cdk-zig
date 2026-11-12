@@ -1,61 +1,124 @@
 const std = @import("std");
 const base32 = @import("base32.zig");
 
-const allocator = @import("allocator.zig").default;
+const assert = @import("assert.zig").assert;
 
 // The checksum prefixed to a textual principal (IC interface spec).
 const Crc32 = std.hash.crc.@"CRC-32/ISO-HDLC";
 
-pub const Principal = []const u8;
+/// Owns its bytes inline. The spec caps a principal at 29 bytes, so there is
+/// nothing to allocate and nothing to borrow.
+pub const Principal = struct {
+    /// A principal is an opaque blob of at most 29 bytes, and its textual
+    /// form is therefore at most 63 characters. Both are fixed by the spec.
+    pub const max_bytes = 29;
+    pub const max_text_len = 63;
 
-pub const managementCanister: Principal = &.{};
-pub const anonymous: Principal = &.{0x04};
+    raw: [max_bytes]u8 = @splat(0),
+    len: u8 = 0,
 
-pub fn encode(principal: Principal) []const u8 {
-    const src = allocator.alloc(u8, 4 + principal.len) catch
-        @panic("failed to allocate memory");
-    const crc = Crc32.hash(principal);
-    std.mem.writeInt(u32, src[0..4], crc, .big);
-    @memcpy(src[4..], principal);
-
-    const dst = allocator.alloc(u8, base32.encode_len(src.len)) catch
-        @panic("failed to allocate memory");
-    base32.std_encoding.encode(dst, src);
-    allocator.free(src);
-
-    for (dst) |*c| {
-        c.* = std.ascii.toLower(c.*);
+    /// Asserts the length. Use `tryFrom` for bytes from an untrusted source.
+    pub fn from(bytes: []const u8) Principal {
+        assert(bytes.len <= max_bytes, "principal is at most 29 bytes");
+        var p = Principal{ .len = @intCast(bytes.len) };
+        @memcpy(p.raw[0..bytes.len], bytes);
+        return p;
     }
 
-    const out = allocator.alloc(u8, dst.len + (dst.len - 1) / 5) catch
-        @panic("failed to allocate memory");
-    insertDashes(out, dst);
-    allocator.free(dst);
-    return out;
+    pub fn tryFrom(bytes: []const u8) error{TooLong}!Principal {
+        if (bytes.len > max_bytes) return error.TooLong;
+        return from(bytes);
+    }
+
+    pub fn slice(self: *const Principal) []const u8 {
+        return self.raw[0..self.len];
+    }
+
+    pub fn eql(self: Principal, other: Principal) bool {
+        return std.mem.eql(u8, self.slice(), other.slice());
+    }
+
+    pub fn isAnonymous(self: Principal) bool {
+        return self.eql(anonymous);
+    }
+
+    pub fn class(self: Principal) Class {
+        if (self.isAnonymous()) return .anonymous;
+        if (self.len == 29) switch (self.raw[28]) {
+            0x02 => return .self_authenticating,
+            0x03 => return .derived,
+            else => {},
+        };
+        return .unclassified;
+    }
+};
+
+/// The classes a principal can be told apart into. Opaque and reserved ids
+/// are both `.other`: the spec says opaque ids typically end in `0x01` but
+/// that users should not rely on it, and that canister ids and user ids are
+/// intentionally indistinguishable.
+pub const Class = enum {
+    /// `0x04`, the anonymous caller.
+    anonymous,
+    /// `H(public_key) · 0x02`. Holders of the matching private key can use
+    /// this as the sender of a request.
+    self_authenticating,
+    /// `H(|registering_principal| · registering_principal · nonce) · 0x03`.
+    derived,
+    /// Opaque or reserved. Canister ids land here: the spec says opaque ids
+    /// typically end in `0x01` but that users should not rely on it.
+    unclassified,
+};
+
+pub const management_canister: Principal = .{};
+pub const anonymous: Principal = blk: {
+    var p = Principal{ .len = 1 };
+    p.raw[0] = 0x04;
+    break :blk p;
+};
+
+pub const Error = base32.DecodeError || error{ InvalidChecksum, TooShort, TooLong };
+
+const checksummed_len = 4 + Principal.max_bytes;
+const group_len = base32.encode_len(checksummed_len);
+
+/// Write the textual form into `dest` and return the part written.
+pub fn toText(dest: *[Principal.max_text_len]u8, p: Principal) []const u8 {
+    const bytes = p.slice();
+
+    var checksummed: [checksummed_len]u8 = undefined;
+    std.mem.writeInt(u32, checksummed[0..4], Crc32.hash(bytes), .big);
+    @memcpy(checksummed[4..][0..bytes.len], bytes);
+
+    var groups: [group_len]u8 = undefined;
+    const groups_used = base32.encode_len(4 + bytes.len);
+    base32.std_encoding.encode(groups[0..groups_used], checksummed[0 .. 4 + bytes.len]);
+    for (groups[0..groups_used]) |*c| c.* = std.ascii.toLower(c.*);
+
+    const out_len = groups_used + (groups_used - 1) / 5;
+    insertDashes(dest[0..out_len], groups[0..groups_used]);
+    return dest[0..out_len];
 }
 
-pub const DecodeError = base32.DecodeError || error{ InvalidChecksum, TooShort };
-
-pub fn decode(text: []const u8) DecodeError!Principal {
-    var slen: usize = 0;
+pub fn fromText(text: []const u8) Error!Principal {
+    var stripped: usize = 0;
     for (text) |c| {
-        if (c != '-') slen += 1;
+        if (c != '-') stripped += 1;
     }
-    const decoded_total = slen * 5 / 8;
-    if (decoded_total < 4) return error.TooShort;
-    const buf = allocator.alloc(u8, decoded_total) catch
-        @panic("failed to allocate memory");
-    const n = try base32.decode(buf, text);
-    if (n < 4) return error.TooShort;
-    return verifyChecksum(buf[0..n]);
-}
+    const decoded_len = stripped * 5 / 8;
+    if (decoded_len < 4) return error.TooShort;
+    if (decoded_len - 4 > Principal.max_bytes) return error.TooLong;
 
-fn verifyChecksum(buf: []const u8) DecodeError!Principal {
-    const checksum = std.mem.readInt(u32, buf[0..4], .big);
-    const data = buf[4..];
-    const computed = Crc32.hash(data);
-    if (checksum != computed) return error.InvalidChecksum;
-    return data;
+    var checksummed: [checksummed_len]u8 = undefined;
+    const n = try base32.decode(&checksummed, text);
+    if (n < 4) return error.TooShort;
+
+    var p = Principal{ .len = @intCast(n - 4) };
+    @memcpy(p.raw[0 .. n - 4], checksummed[4..n]);
+
+    const checksum = std.mem.readInt(u32, checksummed[0..4], .big);
+    if (checksum != Crc32.hash(p.slice())) return error.InvalidChecksum;
+    return p;
 }
 
 fn insertDashes(out: []u8, src: []const u8) void {
@@ -64,116 +127,66 @@ fn insertDashes(out: []u8, src: []const u8) void {
     while (i < src.len) : (i += 1) {
         out[j] = src[i];
         j += 1;
-        if (i % 5 == 4) {
+        if (i % 5 == 4 and i + 1 < src.len) {
             out[j] = '-';
             j += 1;
         }
     }
+    assert(j == out.len, "textual principal length mismatch");
 }
 
-fn strippedLen(comptime text: []const u8) usize {
-    var n: usize = 0;
-    for (text) |c| {
-        if (c != '-') n += 1;
-    }
-    return n;
+/// Only for the diagnostic: an invalid literal becomes a readable compile
+/// error rather than a comptime `unreachable`.
+pub fn comptimeFromText(comptime text: []const u8) Principal {
+    return comptime fromText(text) catch
+        @compileError("invalid principal: " ++ text);
 }
 
-fn comptimeEncodeLen(comptime n: usize) usize {
-    const b32_len = base32.encode_len(n);
-    return b32_len + (b32_len - 1) / 5;
+test "toText" {
+    var buf: [Principal.max_text_len]u8 = undefined;
+    try std.testing.expectEqualStrings("aaaaa-aa", toText(&buf, management_canister));
+    try std.testing.expectEqualStrings("2vxsx-fae", toText(&buf, anonymous));
 }
 
-pub fn comptimeEncode(comptime principal: []const u8) *const [comptimeEncodeLen(4 + principal.len)]u8 {
-    comptime {
-        const crc = Crc32.hash(principal);
-        var src: [4 + principal.len]u8 = undefined;
-        std.mem.writeInt(u32, src[0..4], crc, .big);
-        @memcpy(src[4..], principal);
+test "toText at every length" {
+    var text: [Principal.max_text_len]u8 = undefined;
+    var bytes: [Principal.max_bytes]u8 = @splat(0xCA);
 
-        const b32_len = base32.encode_len(src.len);
-        var b32: [b32_len]u8 = undefined;
-        base32.std_encoding.encode(&b32, &src);
-
-        for (&b32) |*c| {
-            c.* = std.ascii.toLower(c.*);
-        }
-
-        const out_len = b32_len + (b32_len - 1) / 5;
-        var tmp: [out_len]u8 = undefined;
-        insertDashes(&tmp, &b32);
-
-        const out = tmp;
-        return &out;
+    for (0..Principal.max_bytes + 1) |n| {
+        const p = Principal.from(bytes[0..n]);
+        const round_tripped = try fromText(toText(&text, p));
+        try std.testing.expect(p.eql(round_tripped));
     }
 }
 
-pub fn comptimeDecode(comptime text: []const u8) *const [strippedLen(text) * 5 / 8 - 4]u8 {
-    const slen = comptime strippedLen(text);
-    const decoded_total = slen * 5 / 8;
-    const principal_len = decoded_total - 4;
-
-    comptime {
-        var buf: [decoded_total]u8 = std.mem.zeroes([decoded_total]u8);
-        const n = base32.decode(&buf, text) catch
-            @compileError("invalid base32 character");
-        const checksum = std.mem.readInt(u32, buf[0..4], .big);
-        const result: [principal_len]u8 = buf[4..n][0..principal_len].*;
-        const computed = Crc32.hash(&result);
-        if (checksum != computed) {
-            @compileError("invalid principal checksum");
-        }
-        return &result;
-    }
+test "fromText" {
+    const p = try fromText("2vxsx-fae");
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x04}, p.slice());
+    try std.testing.expect(p.eql(anonymous));
 }
 
-test "management canister" {
-    try std.testing.expectEqualSlices(u8, "aaaaa-aa", encode(managementCanister));
+test "fromText rejects bad input" {
+    try std.testing.expectError(error.InvalidChecksum, fromText("2vxsx-faz"));
+    try std.testing.expectError(error.InvalidCharacter, fromText("2vxsx-fa!"));
+    try std.testing.expectError(error.TooShort, fromText("mv"));
 }
 
-test "anonymous" {
-    try std.testing.expectEqualSlices(u8, "2vxsx-fae", encode(anonymous));
+test "class" {
+    try std.testing.expectEqual(Class.anonymous, anonymous.class());
+    try std.testing.expectEqual(Class.unclassified, management_canister.class());
+
+    var bytes: [29]u8 = @splat(0);
+    bytes[28] = 0x02;
+    try std.testing.expectEqual(Class.self_authenticating, Principal.from(&bytes).class());
+
+    bytes[28] = 0x03;
+    try std.testing.expectEqual(Class.derived, Principal.from(&bytes).class());
 }
 
-test "encode anonymous" {
-    try std.testing.expectEqualSlices(u8, "2vxsx-fae", encode(&[_]u8{0x04}));
-}
-
-test "comptimeEncode anonymous" {
-    const text = comptime comptimeEncode(&[_]u8{0x04});
-    try std.testing.expectEqualSlices(u8, "2vxsx-fae", text);
-}
-
-test "comptimeDecode anonymous" {
-    const p = comptime comptimeDecode("2vxsx-fae");
-    try std.testing.expectEqualSlices(u8, &[_]u8{0x04}, p);
-}
-
-test "decode anonymous" {
-    const p = try decode("2vxsx-fae");
-    try std.testing.expectEqualSlices(u8, &[_]u8{0x04}, p);
-}
-
-test "decode invalid checksum" {
-    try std.testing.expectError(error.InvalidChecksum, decode("2vxsx-faz"));
-}
-
-test "decode invalid character" {
-    try std.testing.expectError(error.InvalidCharacter, decode("2vxsx-fa!"));
-}
-
-test "decode too short" {
-    try std.testing.expectError(error.TooShort, decode("mv"));
-}
-
-test "comptimeDecode round-trip" {
+test "comptime round-trip" {
     const text = "tz2ag-zx777-77776-aaabq-cai";
-    const p = comptime comptimeDecode(text);
-    try std.testing.expectEqualSlices(u8, text, encode(p));
-}
+    const p = comptime comptimeFromText(text);
 
-test "comptimeEncode round-trip" {
-    const principal = comptime comptimeDecode("tz2ag-zx777-77776-aaabq-cai");
-    const text = comptime comptimeEncode(principal);
-    try std.testing.expectEqualSlices(u8, "tz2ag-zx777-77776-aaabq-cai", text);
+    var buf: [Principal.max_text_len]u8 = undefined;
+    try std.testing.expectEqualStrings(text, toText(&buf, p));
 }

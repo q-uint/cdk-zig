@@ -151,9 +151,11 @@ pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
         0;
     errdefer handlers.discard(env);
 
+    var callee = request.callee;
+
     ic0.call_new(
-        request.callee.ptr,
-        @intCast(request.callee.len),
+        callee.slice().ptr,
+        @intCast(callee.len),
         request.method.ptr,
         @intCast(request.method.len),
         funcIdx(handlers.replyCallback),

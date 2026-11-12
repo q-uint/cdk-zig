@@ -1,8 +1,8 @@
 const std = @import("std");
 const cdk = @import("cdk");
 pub const bls = @import("bls");
-pub const principal = cdk.principal;
 pub const flamegraph = @import("flamegraph.zig");
+const principal = cdk.principal;
 const candid = cdk.candid;
 const cbor = cdk.cbor;
 const hash_tree = cdk.hash_tree;
@@ -55,7 +55,7 @@ pub const PocketIc = struct {
     allocator: Allocator,
     url: []const u8,
     instance_id: usize,
-    effective_canister_id: []const u8,
+    effective_canister_id: principal.Principal,
     client: *std.http.Client,
     process: ?std.process.Child = null,
     io: std.Io,
@@ -94,10 +94,13 @@ pub const PocketIc = struct {
         const topology = created.object.get("topology").?.object;
         const eff_cid_val = topology.get("default_effective_canister_id").?;
         const eff_cid = switch (eff_cid_val) {
-            .string => |s| principal.decode(s) catch return error.InvalidPrincipal,
+            .string => |s| principal.fromText(s) catch return error.InvalidPrincipal,
             .object => |obj| blk: {
                 const b64 = obj.get("canister_id").?.string;
-                break :blk try base64Decode(allocator, b64);
+                const bytes = try base64Decode(allocator, b64);
+                defer allocator.free(bytes);
+                break :blk principal.Principal.tryFrom(bytes) catch
+                    return error.InvalidPrincipal;
             },
             else => return error.InvalidPrincipal,
         };
@@ -127,17 +130,19 @@ pub const PocketIc = struct {
 
         self.client.deinit();
         self.allocator.destroy(self.client);
-        self.allocator.free(self.effective_canister_id);
         self.allocator.free(self.url);
 
         if (self.process) |*proc| proc.kill(self.io);
     }
 
-    pub fn createCanister(self: *PocketIc) ![]const u8 {
+    pub fn createCanister(self: *PocketIc) !principal.Principal {
         return self.createCanisterWithSender(principal.anonymous);
     }
 
-    pub fn createCanisterWithSender(self: *PocketIc, sender: []const u8) ![]const u8 {
+    pub fn createCanisterWithSender(
+        self: *PocketIc,
+        sender: principal.Principal,
+    ) !principal.Principal {
         const EmptyRecord = struct {};
         const payload = candid.encode(self.allocator, .{EmptyRecord{}}) catch
             return error.CandidEncodingFailed;
@@ -153,12 +158,12 @@ pub const PocketIc = struct {
         const CreateResult = struct { canister_id: candid.Principal };
         const result = candid.decode(CreateResult, self.allocator, reply) catch
             return error.CandidDecodingFailed;
-        return result.canister_id.bytes;
+        return result.canister_id;
     }
 
     pub fn installCode(
         self: *PocketIc,
-        canister_id: []const u8,
+        canister_id: principal.Principal,
         wasm_module: []const u8,
         arg: []const u8,
         mode: InstallMode,
@@ -168,11 +173,11 @@ pub const PocketIc = struct {
 
     pub fn installCodeWithSender(
         self: *PocketIc,
-        canister_id: []const u8,
+        canister_id: principal.Principal,
         wasm_module: []const u8,
         arg: []const u8,
         mode: InstallMode,
-        sender: []const u8,
+        sender: principal.Principal,
     ) !void {
         const InstallCodeMode = union(enum) { install: void, reinstall: void, upgrade: void };
         const InstallCodeArgs = struct {
@@ -188,7 +193,7 @@ pub const PocketIc = struct {
         };
         const payload = candid.encode(self.allocator, .{InstallCodeArgs{
             .arg = candid.Blob.from(arg),
-            .canister_id = candid.Principal.from(canister_id),
+            .canister_id = canister_id,
             .mode = mode_val,
             .wasm_module = candid.Blob.from(wasm_module),
         }}) catch return error.CandidEncodingFailed;
@@ -200,8 +205,8 @@ pub const PocketIc = struct {
 
     pub fn updateCall(
         self: *PocketIc,
-        canister_id: []const u8,
-        sender: []const u8,
+        canister_id: principal.Principal,
+        sender: principal.Principal,
         method: []const u8,
         payload: []const u8,
     ) !WasmResult {
@@ -227,8 +232,8 @@ pub const PocketIc = struct {
 
     pub fn queryCall(
         self: *PocketIc,
-        canister_id: []const u8,
-        sender: []const u8,
+        canister_id: principal.Principal,
+        sender: principal.Principal,
         method: []const u8,
         payload: []const u8,
     ) !WasmResult {
@@ -310,8 +315,8 @@ pub const PocketIc = struct {
         try self.setTime(current + nanos);
     }
 
-    pub fn addCycles(self: *PocketIc, canister_id: []const u8, amount: u128) !u128 {
-        const cid_b64 = try base64Encode(self.allocator, canister_id);
+    pub fn addCycles(self: *PocketIc, canister_id: principal.Principal, amount: u128) !u128 {
+        const cid_b64 = try base64Encode(self.allocator, canister_id.slice());
         defer self.allocator.free(cid_b64);
 
         const body = try std.fmt.allocPrint(
@@ -339,8 +344,8 @@ pub const PocketIc = struct {
         return @intCast(parsed.value.object.get("cycles").?.integer);
     }
 
-    pub fn getCycles(self: *PocketIc, canister_id: []const u8) !u128 {
-        const cid_b64 = try base64Encode(self.allocator, canister_id);
+    pub fn getCycles(self: *PocketIc, canister_id: principal.Principal) !u128 {
+        const cid_b64 = try base64Encode(self.allocator, canister_id.slice());
         defer self.allocator.free(cid_b64);
 
         const body = try std.fmt.allocPrint(
@@ -394,7 +399,7 @@ pub const PocketIc = struct {
 
     fn managementCallWithEffective(
         self: *PocketIc,
-        sender: []const u8,
+        sender: principal.Principal,
         method: []const u8,
         payload: []const u8,
         effective: EffectivePrincipal,
@@ -402,7 +407,7 @@ pub const PocketIc = struct {
         const call_json = try buildCanisterCallJson(
             self.allocator,
             sender,
-            principal.managementCanister,
+            principal.management_canister,
             method,
             payload,
             effective,
@@ -471,7 +476,7 @@ pub const PocketIc = struct {
 
     pub fn readStateCertificate(
         self: *PocketIc,
-        canister_id: []const u8,
+        canister_id: principal.Principal,
         paths: []const []const []const u8,
     ) !Certificate {
         // Build the CBOR read_state request envelope.
@@ -533,7 +538,8 @@ pub const PocketIc = struct {
         const tagged = tagged_buf[0..pos];
 
         // POST to read_state endpoint.
-        const cid_text = principal.encode(canister_id);
+        var cid_buf: [principal.Principal.max_text_len]u8 = undefined;
+        const cid_text = principal.toText(&cid_buf, canister_id);
         const url = try std.fmt.allocPrint(
             self.allocator,
             "{s}/instances/{d}/api/v2/canister/{s}/read_state",
@@ -606,7 +612,7 @@ pub const PocketIc = struct {
         // Look up the subnet for the effective_canister_id, then fetch
         // that subnet's public key via read/pub_key.
 
-        const subnet_b64 = try base64Encode(self.allocator, self.effective_canister_id);
+        const subnet_b64 = try base64Encode(self.allocator, self.effective_canister_id.slice());
         defer self.allocator.free(subnet_b64);
 
         // First get the subnet_id for our effective canister.
@@ -902,7 +908,7 @@ fn startServer(allocator: Allocator, io: std.Io, bin_path: []const u8) !ServerIn
 
 const EffectivePrincipal = union(enum) {
     none,
-    canister_id: []const u8,
+    canister_id: principal.Principal,
     subnet_id: []const u8,
 };
 
@@ -949,15 +955,15 @@ fn buildInstanceConfigJson(allocator: Allocator, config: PocketIcConfig) ![]cons
 
 fn buildCanisterCallJson(
     allocator: Allocator,
-    sender: []const u8,
-    canister_id: []const u8,
+    sender: principal.Principal,
+    canister_id: principal.Principal,
     method: []const u8,
     payload: []const u8,
     effective: EffectivePrincipal,
 ) ![]const u8 {
-    const sender_b64 = try base64Encode(allocator, sender);
+    const sender_b64 = try base64Encode(allocator, sender.slice());
     defer allocator.free(sender_b64);
-    const cid_b64 = try base64Encode(allocator, canister_id);
+    const cid_b64 = try base64Encode(allocator, canister_id.slice());
     defer allocator.free(cid_b64);
     const payload_b64 = try base64Encode(allocator, payload);
     defer allocator.free(payload_b64);
@@ -975,7 +981,7 @@ fn buildCanisterCallJson(
     switch (effective) {
         .none => try s.write("None"),
         .canister_id => |cid| {
-            const eff_b64 = try base64Encode(allocator, cid);
+            const eff_b64 = try base64Encode(allocator, cid.slice());
             defer allocator.free(eff_b64);
             try s.write(.{ .CanisterId = eff_b64 });
         },
@@ -1083,11 +1089,11 @@ test "candid encode install_code round-trip" {
         mode: InstallCodeMode,
         wasm_module: candid.Blob,
     };
-    const canister_id = &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01 };
+    const canister_id = comptime principal.comptimeFromText("tz2ag-zx777-77776-aaabq-cai");
     const wasm = &[_]u8{ 0x00, 0x61, 0x73, 0x6d };
     const encoded = try candid.encode(testing.allocator, .{InstallCodeArgs{
         .arg = candid.Blob.from(""),
-        .canister_id = candid.Principal.from(canister_id),
+        .canister_id = canister_id,
         .mode = .{ .install = {} },
         .wasm_module = candid.Blob.from(wasm),
     }});
@@ -1097,23 +1103,21 @@ test "candid encode install_code round-trip" {
 
     const decoded = try candid.decode(InstallCodeArgs, testing.allocator, encoded);
     defer testing.allocator.free(decoded.arg.data);
-    defer testing.allocator.free(decoded.canister_id.bytes);
     defer testing.allocator.free(decoded.wasm_module.data);
-    try testing.expectEqualSlices(u8, canister_id, decoded.canister_id.bytes);
+    try testing.expect(decoded.canister_id.eql(canister_id));
     try testing.expectEqualSlices(u8, wasm, decoded.wasm_module.data);
 }
 
 test "candid decode principal from record" {
     const CreateResult = struct { canister_id: candid.Principal };
-    const principal_bytes = &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01 };
+    const expected = comptime principal.comptimeFromText("tz2ag-zx777-77776-aaabq-cai");
     const encoded = try candid.encode(testing.allocator, .{CreateResult{
-        .canister_id = candid.Principal.from(principal_bytes),
+        .canister_id = expected,
     }});
     defer testing.allocator.free(encoded);
 
     const decoded = try candid.decode(CreateResult, testing.allocator, encoded);
-    defer testing.allocator.free(decoded.canister_id.bytes);
-    try testing.expectEqualSlices(u8, principal_bytes, decoded.canister_id.bytes);
+    try testing.expect(decoded.canister_id.eql(expected));
 }
 
 test "buildInstanceConfigJson default" {
@@ -1151,8 +1155,8 @@ test "buildInstanceConfigJson with nns" {
 test "buildCanisterCallJson with none effective principal" {
     const json = try buildCanisterCallJson(
         testing.allocator,
-        &.{0x04}, // anonymous
-        &.{}, // management canister
+        principal.anonymous,
+        principal.management_canister,
         "test_method",
         "payload",
         .none,
@@ -1172,10 +1176,10 @@ test "buildCanisterCallJson with none effective principal" {
 }
 
 test "buildCanisterCallJson with canister_id effective principal" {
-    const cid = &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01 };
+    const cid = comptime principal.comptimeFromText("tz2ag-zx777-77776-aaabq-cai");
     const json = try buildCanisterCallJson(
         testing.allocator,
-        &.{0x04},
+        principal.anonymous,
         cid,
         "greet",
         "",
@@ -1339,7 +1343,6 @@ test "server: create canister" {
     defer ts.deinit();
 
     const cid = try ts.pic.createCanister();
-    defer testing.allocator.free(cid);
     try testing.expect(cid.len > 0);
 }
 
@@ -1348,7 +1351,6 @@ test "server: install code and query" {
     defer ts.deinit();
 
     const cid = try ts.pic.createCanister();
-    defer testing.allocator.free(cid);
     try ts.pic.installCode(cid, &test_canister_wasm, "", .install);
 
     const result = try ts.pic.queryCall(cid, principal.anonymous, "greet", "");
@@ -1396,7 +1398,6 @@ test "server: add and get cycles" {
     defer ts.deinit();
 
     const cid = try ts.pic.createCanister();
-    defer testing.allocator.free(cid);
     const added = try ts.pic.addCycles(cid, 1_000_000_000_000);
     try testing.expect(added > 0);
 
@@ -1409,6 +1410,5 @@ test "server: multiple subnets" {
     defer ts.deinit();
 
     const cid = try ts.pic.createCanister();
-    defer testing.allocator.free(cid);
     try testing.expect(cid.len > 0);
 }

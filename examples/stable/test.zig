@@ -1,4 +1,5 @@
 const std = @import("std");
+const cdk = @import("cdk");
 const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
@@ -18,14 +19,14 @@ fn readWasm64() ![]const u8 {
 
 fn expectReply(
     pocket: *pic.PocketIc,
-    cid: []const u8,
+    cid: cdk.principal.Principal,
     method: []const u8,
     arg: []const u8,
     comptime call_type: enum { query, update },
 ) ![]const u8 {
     const result = switch (call_type) {
-        .query => try pocket.queryCall(cid, pic.principal.anonymous, method, arg),
-        .update => try pocket.updateCall(cid, pic.principal.anonymous, method, arg),
+        .query => try pocket.queryCall(cid, cdk.principal.anonymous, method, arg),
+        .update => try pocket.updateCall(cid, cdk.principal.anonymous, method, arg),
     };
     switch (result) {
         .reply => |data| return data,
@@ -45,7 +46,6 @@ test "stable_size starts at zero" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     const data = try expectReply(&pocket, cid, "get_size", "", .query);
@@ -63,7 +63,6 @@ test "grow and size" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Grow by 3 pages, should return old size (0).
@@ -87,7 +86,6 @@ test "write and read round-trip" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Grow 1 page.
@@ -120,7 +118,6 @@ test "write and read at page boundary" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Grow 2 pages (128 KiB).
@@ -154,7 +151,6 @@ test "streaming writer and reader" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // stream_write splits the payload in half internally and writes both.
@@ -184,7 +180,6 @@ test "counter persists across upgrade" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Increment counter 3 times.
@@ -215,7 +210,6 @@ test "wasm64: write and read round-trip" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Grow 1 page.

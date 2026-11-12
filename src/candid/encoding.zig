@@ -28,8 +28,8 @@ pub fn encode(alloc: Allocator, args: anytype) ![]const u8 {
 fn encodeValue(writer: anytype, comptime T: type, value: T) std.Io.Writer.Error!void {
     if (T == t.Principal) {
         try writer.writeByte(1);
-        try writer.writeUleb128(@as(u32, @intCast(value.bytes.len)));
-        return writer.writeAll(value.bytes);
+        try writer.writeUleb128(@as(u32, value.len));
+        return writer.writeAll(value.slice());
     }
     if (T == t.Blob) {
         try writer.writeUleb128(@as(u32, @intCast(value.data.len)));
@@ -38,15 +38,15 @@ fn encodeValue(writer: anytype, comptime T: type, value: T) std.Io.Writer.Error!
     if (comptime t.isFuncType(T)) {
         try writer.writeByte(1);
         try writer.writeByte(1);
-        try writer.writeUleb128(@as(u32, @intCast(value.service.bytes.len)));
-        try writer.writeAll(value.service.bytes);
+        try writer.writeUleb128(@as(u32, value.service.len));
+        try writer.writeAll(value.service.slice());
         try writer.writeUleb128(@as(u32, @intCast(value.method.len)));
         return writer.writeAll(value.method);
     }
     if (T == t.Service) {
         try writer.writeByte(1);
-        try writer.writeUleb128(@as(u32, @intCast(value.principal.bytes.len)));
-        return writer.writeAll(value.principal.bytes);
+        try writer.writeUleb128(@as(u32, value.principal.len));
+        return writer.writeAll(value.principal.slice());
     }
     if (T == t.Reserved) return;
 
@@ -416,9 +416,8 @@ test "round-trip func" {
     defer testing.allocator.free(bytes);
 
     const decoded = try decode(t.Func, testing.allocator, bytes);
-    defer testing.allocator.free(decoded.service.bytes);
     defer testing.allocator.free(decoded.method);
-    try testing.expectEqualSlices(u8, &pid, decoded.service.bytes);
+    try testing.expectEqualSlices(u8, &pid, decoded.service.slice());
     try testing.expectEqualStrings("greet", decoded.method);
 }
 
@@ -429,8 +428,7 @@ test "round-trip service" {
     defer testing.allocator.free(bytes);
 
     const decoded = try decode(t.Service, testing.allocator, bytes);
-    defer testing.allocator.free(decoded.principal.bytes);
-    try testing.expectEqualSlices(u8, &pid, decoded.principal.bytes);
+    try testing.expectEqualSlices(u8, &pid, decoded.principal.slice());
 }
 
 test "encode nat (u128)" {

@@ -1,12 +1,6 @@
 const std = @import("std");
 
-pub const Principal = struct {
-    bytes: []const u8,
-
-    pub fn from(b: []const u8) Principal {
-        return .{ .bytes = b };
-    }
-};
+pub const Principal = @import("../principal.zig").Principal;
 
 pub const Blob = struct {
     data: []const u8,

@@ -18,14 +18,14 @@ fn readWasm() ![]const u8 {
 
 fn expectReply(
     pocket: *pic.PocketIc,
-    cid: []const u8,
+    cid: cdk.principal.Principal,
     method: []const u8,
     arg: []const u8,
     comptime call_type: enum { query, update },
 ) ![]const u8 {
     const result = switch (call_type) {
-        .query => try pocket.queryCall(cid, pic.principal.anonymous, method, arg),
-        .update => try pocket.updateCall(cid, pic.principal.anonymous, method, arg),
+        .query => try pocket.queryCall(cid, cdk.principal.anonymous, method, arg),
+        .update => try pocket.updateCall(cid, cdk.principal.anonymous, method, arg),
     };
     switch (result) {
         .reply => |data| return data,
@@ -89,7 +89,6 @@ test "set and get round-trip" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     const value = "hello certified world";
@@ -109,7 +108,6 @@ test "get_with_proof returns certificate with correct certified_data" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     const value = "hello certified world";
@@ -129,7 +127,7 @@ test "get_with_proof returns certificate with correct certified_data" {
     try std.testing.expectEqualSlices(u8, &expected_hash, returned_hash);
 
     // Parse the certificate and verify certified_data matches.
-    const certified_data = try extractCertifiedData(cid, cert_bytes);
+    const certified_data = try extractCertifiedData(cid.slice(), cert_bytes);
     try std.testing.expectEqualSlices(u8, &expected_hash, certified_data);
 }
 
@@ -141,7 +139,6 @@ test "overwrite updates certified_data in certificate" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Set first value and verify.
@@ -151,7 +148,7 @@ test "overwrite updates certified_data in certificate" {
 
     const proof1 = try expectReply(&pocket, cid, "get_with_proof", "", .query);
     defer allocator.free(proof1);
-    const cd1 = try extractCertifiedData(cid, proof1[32..]);
+    const cd1 = try extractCertifiedData(cid.slice(), proof1[32..]);
     const expected1 = labeledHash("data", leafHash(v1));
     try std.testing.expectEqualSlices(u8, &expected1, cd1);
 
@@ -162,7 +159,7 @@ test "overwrite updates certified_data in certificate" {
 
     const proof2 = try expectReply(&pocket, cid, "get_with_proof", "", .query);
     defer allocator.free(proof2);
-    const cd2 = try extractCertifiedData(cid, proof2[32..]);
+    const cd2 = try extractCertifiedData(cid.slice(), proof2[32..]);
     const expected2 = labeledHash("data", leafHash(v2));
     try std.testing.expectEqualSlices(u8, &expected2, cd2);
 
@@ -178,7 +175,6 @@ test "certificate BLS signature verifies against root key" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     const value = "bls verified";
@@ -187,7 +183,7 @@ test "certificate BLS signature verifies against root key" {
 
     // Get a certificate via read_state.
     const paths = [_][]const []const u8{
-        &.{ "canister", cid, "module_hash" },
+        &.{ "canister", cid.slice(), "module_hash" },
     };
     var cert = try pocket.readStateCertificate(cid, &paths);
     defer cert.deinit();

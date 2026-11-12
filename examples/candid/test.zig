@@ -1,4 +1,5 @@
 const std = @import("std");
+const cdk = @import("cdk");
 const pic = @import("pocket-ic");
 const candid = @import("cdk").candid;
 
@@ -25,13 +26,12 @@ test "callee greet" {
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();
-    defer allocator.free(callee_id);
     try pocket.installCode(callee_id, callee_wasm, "", .install);
 
     const arg = try candid.encode(allocator, .{@as([]const u8, "world")});
     defer allocator.free(arg);
 
-    const result = try pocket.queryCall(callee_id, pic.principal.anonymous, "greet", arg);
+    const result = try pocket.queryCall(callee_id, cdk.principal.anonymous, "greet", arg);
     switch (result) {
         .reply => |data| {
             defer allocator.free(data);
@@ -57,15 +57,14 @@ test "caller calls callee" {
     defer pocket.deinit();
 
     const callee_id = try pocket.createCanister();
-    defer allocator.free(callee_id);
     try pocket.installCode(callee_id, callee_wasm, "", .install);
 
-    const callee_text = pic.principal.encode(callee_id);
+    const install_arg = try candid.encode(allocator, .{callee_id});
+    defer allocator.free(install_arg);
     const caller_id = try pocket.createCanister();
-    defer allocator.free(caller_id);
-    try pocket.installCode(caller_id, caller_wasm, callee_text, .install);
+    try pocket.installCode(caller_id, caller_wasm, install_arg, .install);
 
-    const result = try pocket.updateCall(caller_id, pic.principal.anonymous, "call_greet", "");
+    const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_greet", "");
     switch (result) {
         .reply => |data| {
             defer allocator.free(data);

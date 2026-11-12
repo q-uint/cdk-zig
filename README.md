@@ -116,7 +116,7 @@ fn replied(data: []const u8) tr.Transition {
 }
 
 fn callOther() tr.Transition {
-    const callee = cdk.principal.comptimeEncode("aaaaa-aa");
+    const callee = comptime cdk.principal.comptimeFromText("aaaaa-aa");
     return tr.commit(.{ .onReply = replied }, .{
         .callee = callee,
         .method = "some_method",

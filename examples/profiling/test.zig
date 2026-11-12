@@ -1,4 +1,5 @@
 const std = @import("std");
+const cdk = @import("cdk");
 const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
@@ -12,8 +13,8 @@ fn readWasm(name: []const u8) ![]const u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, name, allocator, .limited(10 * 1024 * 1024));
 }
 
-fn callUpdate(pocket: *pic.PocketIc, cid: []const u8, method: []const u8) !void {
-    const result = try pocket.updateCall(cid, pic.principal.anonymous, method, "");
+fn callUpdate(pocket: *pic.PocketIc, cid: cdk.principal.Principal, method: []const u8) !void {
+    const result = try pocket.updateCall(cid, cdk.principal.anonymous, method, "");
     switch (result) {
         .reply => |data| allocator.free(data),
         .reject => |msg| {
@@ -24,9 +25,8 @@ fn callUpdate(pocket: *pic.PocketIc, cid: []const u8, method: []const u8) !void 
     }
 }
 
-fn deployAndTrace(pocket: *pic.PocketIc, wasm: []const u8) ![]const u8 {
+fn deployAndTrace(pocket: *pic.PocketIc, wasm: []const u8) !cdk.principal.Principal {
     const cid = try pocket.createCanister();
-    errdefer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
     try callUpdate(pocket, cid, "__toggle_tracing");
     try callUpdate(pocket, cid, "compute");
@@ -41,7 +41,6 @@ test "profiling trace produces folded stacks" {
     defer pocket.deinit();
 
     const cid = try deployAndTrace(&pocket, wasm);
-    defer allocator.free(cid);
 
     // Fetch instruction flamegraph.
     var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .instructions);
@@ -70,7 +69,6 @@ test "stable memory flamegraph tracks page growth" {
     defer pocket.deinit();
 
     const cid = try deployAndTrace(&pocket, wasm);
-    defer allocator.free(cid);
 
     var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .stable_pages);
     defer trace.deinit();
@@ -98,7 +96,6 @@ test "heap memory flamegraph" {
     defer pocket.deinit();
 
     const cid = try deployAndTrace(&pocket, wasm);
-    defer allocator.free(cid);
 
     var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .heap_bytes);
     defer trace.deinit();
@@ -114,10 +111,9 @@ test "__get_cycles returns instruction count" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
-    const result = try pocket.queryCall(cid, pic.principal.anonymous, "__get_cycles", "");
+    const result = try pocket.queryCall(cid, cdk.principal.anonymous, "__get_cycles", "");
     switch (result) {
         .reply => |data| {
             defer allocator.free(data);
@@ -140,7 +136,6 @@ test "tracing disabled by default produces empty trace" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Call compute without enabling tracing.

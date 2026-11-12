@@ -16,6 +16,8 @@ pub const profiling = @import("profiling.zig");
 
 pub const allocator = @import("allocator.zig").default;
 
+pub const assert = @import("assert.zig").assert;
+
 pub const CandidCodec = struct {
     pub fn encode(comptime T: type, value: T) []const u8 {
         return candid.encode(allocator, .{value}) catch
@@ -81,12 +83,10 @@ pub fn trap(msg: []const u8) noreturn {
 // Message input
 pub fn caller() principal.Principal {
     const len = ic0.msg_caller_size();
-    const bytes = allocator.alloc(
-        u8,
-        @intCast(len),
-    ) catch @panic("failed to allocate memory");
-    ic0.msg_caller_copy(bytes.ptr, 0, len);
-    return bytes;
+    assert(len <= principal.Principal.max_bytes, "caller principal exceeds 29 bytes");
+    var p = principal.Principal{ .len = @intCast(len) };
+    ic0.msg_caller_copy(&p.raw, 0, len);
+    return p;
 }
 
 pub fn argData() []const u8 {
@@ -170,10 +170,10 @@ pub fn cyclesBurn128(amount: u128) u128 {
 // Canister info
 pub fn canisterSelf() principal.Principal {
     const len = ic0.canister_self_size();
-    const bytes = allocator.alloc(u8, @intCast(len)) catch
-        @panic("failed to allocate memory");
-    ic0.canister_self_copy(bytes.ptr, 0, len);
-    return bytes;
+    assert(len <= principal.Principal.max_bytes, "canister principal exceeds 29 bytes");
+    var p = principal.Principal{ .len = @intCast(len) };
+    ic0.canister_self_copy(&p.raw, 0, len);
+    return p;
 }
 
 pub fn canisterCycleBalance128() u128 {
@@ -199,10 +199,10 @@ pub fn canisterVersion() u64 {
 // Subnet info
 pub fn subnetSelf() principal.Principal {
     const len = ic0.subnet_self_size();
-    const bytes = allocator.alloc(u8, @intCast(len)) catch
-        @panic("failed to allocate memory");
-    ic0.subnet_self_copy(bytes.ptr, 0, len);
-    return bytes;
+    assert(len <= principal.Principal.max_bytes, "subnet principal exceeds 29 bytes");
+    var p = principal.Principal{ .len = @intCast(len) };
+    ic0.subnet_self_copy(&p.raw, 0, len);
+    return p;
 }
 
 // Time and timers
@@ -229,7 +229,7 @@ pub fn callContextInstructionCounter() u64 {
 
 // Authorization
 pub fn isController(p: principal.Principal) bool {
-    return ic0.is_controller(p.ptr, @intCast(p.len)) != 0;
+    return ic0.is_controller(p.slice().ptr, @intCast(p.len)) != 0;
 }
 
 // Execution context

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cdk = @import("cdk");
 const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
@@ -12,8 +13,8 @@ fn readWasm(name: []const u8) ![]const u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, name, allocator, .limited(10 * 1024 * 1024));
 }
 
-fn getCounter(pocket: *pic.PocketIc, canister_id: []const u8) !u32 {
-    const result = try pocket.queryCall(canister_id, pic.principal.anonymous, "get_counter", "");
+fn getCounter(pocket: *pic.PocketIc, canister_id: cdk.principal.Principal) !u32 {
+    const result = try pocket.queryCall(canister_id, cdk.principal.anonymous, "get_counter", "");
     switch (result) {
         .reply => |data| {
             defer allocator.free(data);
@@ -36,7 +37,6 @@ test "one-shot timer fires after delay" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Counter should start at 0.
@@ -60,7 +60,6 @@ test "interval timer increments repeatedly" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Advance 2 seconds and tick -- interval should have fired at least once.
@@ -84,7 +83,6 @@ test "cancel timer stops firing" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Let the interval fire a few times.
@@ -94,7 +92,7 @@ test "cancel timer stops firing" {
     try std.testing.expect(before >= 1);
 
     // Stop the interval timer via update call.
-    const stop_result = try pocket.updateCall(cid, pic.principal.anonymous, "stop_interval", "");
+    const stop_result = try pocket.updateCall(cid, cdk.principal.anonymous, "stop_interval", "");
     switch (stop_result) {
         .reply => |data| allocator.free(data),
         .reject => |msg| {
@@ -121,7 +119,6 @@ test "counter stays zero without advancing time" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Tick without advancing time -- timers should not have fired.
@@ -138,10 +135,9 @@ test "query non-existent method on timer canister" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
-    const result = try pocket.queryCall(cid, pic.principal.anonymous, "no_such_method", "");
+    const result = try pocket.queryCall(cid, cdk.principal.anonymous, "no_such_method", "");
     switch (result) {
         .reply => |data| {
             defer allocator.free(data);
@@ -162,11 +158,10 @@ test "double cancel is safe" {
     defer pocket.deinit();
 
     const cid = try pocket.createCanister();
-    defer allocator.free(cid);
     try pocket.installCode(cid, wasm, "", .install);
 
     // Stop the interval timer twice -- second call should be a no-op.
-    const stop1 = try pocket.updateCall(cid, pic.principal.anonymous, "stop_interval", "");
+    const stop1 = try pocket.updateCall(cid, cdk.principal.anonymous, "stop_interval", "");
     switch (stop1) {
         .reply => |data| allocator.free(data),
         .reject => |msg| {
@@ -175,7 +170,7 @@ test "double cancel is safe" {
         },
     }
 
-    const stop2 = try pocket.updateCall(cid, pic.principal.anonymous, "stop_interval", "");
+    const stop2 = try pocket.updateCall(cid, cdk.principal.anonymous, "stop_interval", "");
     switch (stop2) {
         .reply => |data| allocator.free(data),
         .reject => |msg| {

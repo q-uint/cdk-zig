@@ -11,6 +11,7 @@
 //     flamegraph.pl profile.folded > profile.svg
 
 const std = @import("std");
+const cdk = @import("cdk");
 const pic = @import("pocket_ic.zig");
 
 const Allocator = std.mem.Allocator;
@@ -77,7 +78,7 @@ pub const Trace = struct {
 pub fn fetch(
     allocator: Allocator,
     pocket: *pic.PocketIc,
-    canister_id: []const u8,
+    canister_id: cdk.principal.Principal,
     metric: Metric,
 ) !Trace {
     var names = std.AutoArrayHashMapUnmanaged(i32, []const u8){};
@@ -89,7 +90,7 @@ pub fn fetch(
     // Fetch name table.
     const names_result = try pocket.queryCall(
         canister_id,
-        pic.principal.anonymous,
+        cdk.principal.anonymous,
         "__get_profiling_names",
         "",
     );
@@ -112,7 +113,7 @@ pub fn fetch(
     while (true) {
         const result = try pocket.queryCall(
             canister_id,
-            pic.principal.anonymous,
+            cdk.principal.anonymous,
             "__get_profiling",
             &std.mem.toBytes(page),
         );

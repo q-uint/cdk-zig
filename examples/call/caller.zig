@@ -10,12 +10,11 @@ pub var tracking: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .{
 
 pub const cdk_allocator = tracking.allocator();
 
-pub var callee_principal: ?[]const u8 = null;
+pub var callee_principal: ?cdk.principal.Principal = null;
 
-fn init() void {
-    const arg = cdk.argData();
+fn init(arg: []const u8) void {
     if (arg.len == 0) return;
-    callee_principal = cdk.principal.decode(arg) catch
+    callee_principal = cdk.principal.Principal.tryFrom(arg) catch
         @panic("invalid principal");
 }
 

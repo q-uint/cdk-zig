@@ -4,13 +4,10 @@ const tr = cdk.transition;
 
 pub const cdk_codec = cdk.CandidCodec;
 
-var callee_principal: ?[]const u8 = null;
+var callee_principal: ?cdk.principal.Principal = null;
 
-fn init() void {
-    const arg = cdk.argData();
-    if (arg.len == 0) return;
-    callee_principal = cdk.principal.decode(arg) catch
-        @panic("invalid principal");
+fn init(callee: cdk.principal.Principal) void {
+    callee_principal = callee;
 }
 
 const Greeting = struct {

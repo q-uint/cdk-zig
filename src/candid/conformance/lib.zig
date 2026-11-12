@@ -72,7 +72,6 @@ pub fn expectDecodeManyError(comptime T: type, expected: anyerror, bytes: []cons
 
 pub fn freeOptFunc(val: ?Func) void {
     if (val) |v| {
-        testing.allocator.free(v.service.bytes);
         testing.allocator.free(v.method);
     }
 }
