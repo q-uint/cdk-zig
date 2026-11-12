@@ -23,7 +23,7 @@ comptime {
 
 /// Whether the spec permits calling `ic0.<name>` from `context`. An unknown
 /// name is a compile error rather than a false.
-pub fn allows(comptime name: []const u8, comptime context: Context) bool {
+pub fn allows(comptime name: []const u8, comptime context: ic0.Context) bool {
     @setEvalBranchQuota(2_000_000);
     for (entries) |entry| {
         if (!std.mem.eql(u8, entry.name, name)) continue;
@@ -106,51 +106,15 @@ const Param = struct {
     }
 };
 
-/// Where a System API call may be made from. The codes are the spec's own.
-pub const Context = enum {
-    /// canister_init or canister_post_upgrade
-    I,
-    /// canister_pre_upgrade
-    G,
-    /// canister_update
-    U,
-    /// canister_query, replicated
-    RQ,
-    /// canister_query, non-replicated
-    NRQ,
-    /// canister_query, as a http outcall transform
-    TQ,
-    /// canister_composite_query
-    CQ,
-    /// reply callback
-    Ry,
-    /// reject callback
-    Rt,
-    /// reply callback in a composite query
-    CRy,
-    /// reject callback in a composite query
-    CRt,
-    /// cleanup callback
-    C,
-    /// cleanup callback in a composite query
-    CC,
-    /// canister_inspect_message
-    F,
-    /// system task: heartbeat, global timer, or on low wasm memory
-    T,
-    /// the (start) module initialization function
-    s,
-};
-
 const Entry = struct {
     name: []const u8,
     params: []const Param,
     returns: []const u8,
-    contexts: []const Context,
+    contexts: []const ic0.Context,
 };
 
 // What the spec's `*` stands for. Deliberately excludes `s`.
-const every_context: []const Context = &.{
+const every_context: []const ic0.Context = &.{
     .I, .G, .U, .RQ, .NRQ, .TQ, .CQ, .Ry, .Rt, .CRy, .CRt, .C, .CC, .F, .T,
 };
 
@@ -158,10 +122,10 @@ const every_context: []const Context = &.{
 // Its prose puts the call in "all calls to query and composite query methods,
 // including calls in replicated mode", and CQ appears separately on that same
 // line, so Q is the query methods.
-const query_contexts: []const Context = &.{ .RQ, .NRQ, .TQ };
+const query_contexts: []const ic0.Context = &.{ .RQ, .NRQ, .TQ };
 
-fn splitContexts(comptime text: []const u8) []const Context {
-    var out: [countContexts(text)]Context = undefined;
+fn splitContexts(comptime text: []const u8) []const ic0.Context {
+    var out: [countContexts(text)]ic0.Context = undefined;
     var i: usize = 0;
     var it = std.mem.tokenizeAny(u8, text, " \t");
     while (it.next()) |token| {
@@ -183,15 +147,15 @@ fn countContexts(comptime text: []const u8) usize {
     return count;
 }
 
-fn expand(comptime token: []const u8) []const Context {
+fn expand(comptime token: []const u8) []const ic0.Context {
     if (std.mem.eql(u8, token, "*")) return every_context;
     if (std.mem.eql(u8, token, "Q")) return query_contexts;
     return &.{toContext(token)};
 }
 
-fn toContext(comptime token: []const u8) Context {
-    inline for (@typeInfo(Context).@"enum".field_names) |name| {
-        if (std.mem.eql(u8, name, token)) return @field(Context, name);
+fn toContext(comptime token: []const u8) ic0.Context {
+    inline for (@typeInfo(ic0.Context).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, name, token)) return @field(ic0.Context, name);
     }
     @compileError("ic0.spec has an unknown context code: " ++ token);
 }

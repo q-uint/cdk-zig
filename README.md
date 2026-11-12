@@ -125,21 +125,16 @@ fn callOther() tr.Transition {
 }
 ```
 
-The first struct is comptime, because a continuation's address is needed to
-name it to the system. The second is the call itself, and also takes
-`.cycles` and `.timeout_seconds`.
+The first struct is comptime, the second is the call, which also takes
+`.cycles` and `.timeout_seconds`. `commit` returns a `Transition` the entry
+point must return, so nothing can follow the call.
 
-`onReject` defaults to forwarding the callee's reject message on to your
-caller. Pass `.onReject` when you want to handle it yourself.
-
-`commit` returns a `Transition` that the entry point must return, so nothing
-can follow the call. Nothing is passed to the continuations either: state they
-need is re-read from the canister, because the commit means it may have
-changed underneath.
+`onReject` defaults to forwarding the callee's rejection. A continuation
+borrows its reply: the buffer is freed when it returns, so copy anything kept
+beyond that.
 
 Declare a codec to encode arguments and decode replies into types. Any format
-works that provides `encode(comptime T: type, value: T) []const u8` and
-`decode(comptime T: type, bytes: []const u8) T`:
+works that provides `encode` and `decode`:
 
 ```zig
 pub const cdk_codec = cdk.CandidCodec;
@@ -158,6 +153,46 @@ return tr.commit(.{ .onReply = replied }, .{
 `cdk_codec` covers entry point arguments, replies and calls alike. Pass
 `.codec` in the first struct to override it for one call, for a canister that
 talks to peers using different formats.
+
+### Carrying state across a commit
+
+Anything the continuation needs is either re-read from canister state, or
+travels as `.pending`:
+
+```zig
+const Transfer = struct {
+    to: []const u8,
+    amount: u64,
+
+    fn deinit(self: Transfer) void {
+        cdk.allocator.free(self.to);
+    }
+};
+
+fn settled(pending: Transfer, block: u64) tr.Transition {
+    credit(pending.to, block);
+    return tr.reply(block);
+}
+
+return tr.commit(.{
+    .onReply = settled,
+    .onFinish = Transfer.deinit,
+}, .{
+    .callee = ledger,
+    .method = "transfer",
+    .arg = args,
+    .pending = Transfer{ .to = to, .amount = amount },
+}) catch tr.reject("call failed");
+```
+
+Carry intent, not observations. A balance or config read before the call is
+stale by the time the continuation runs. `Transfer` above records what was
+asked for, and `credit` re-reads what it needs.
+
+The type comes from `onReply`'s first parameter, and `onReject` must match.
+`.onFinish` runs on whichever of reply, reject or cleanup happens, so state
+owning memory is freed exactly once. `.capacity` bounds how many such calls a
+call site may have in flight.
 
 ### Stable memory
 

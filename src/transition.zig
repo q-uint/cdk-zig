@@ -9,6 +9,7 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 const ic0 = @import("ic0.zig");
+const ic0_spec = @import("ic0_spec.zig");
 const root = @import("root");
 
 const allocator = @import("allocator.zig").default;
@@ -44,15 +45,13 @@ pub const Rejection = struct {
 
 var call_performed: bool = false;
 
-/// Called by the generated entry points and callbacks, not by canister code.
-pub fn beginMessage() void {
+fn beginMessage() void {
     call_performed = false;
 }
 
-/// Called by the generated entry points and callbacks, not by canister code.
-/// A message that sent a call must end by returning that call's Transition,
-/// or its continuation will arrive and respond a second time.
-pub fn checkOutcome(outcome: ?Transition) void {
+// A message that sent a call must end by returning that call's Transition,
+// or its continuation will arrive and respond a second time.
+fn checkOutcome(outcome: ?Transition) void {
     if (!call_performed) return;
     const settled = outcome orelse
         trap("cdk: an entry point returning void sent a call, it must return a Transition");
@@ -328,6 +327,58 @@ fn Handlers(
             discard(env);
         }
     };
+}
+
+/// Wraps a canister entry point into the shape the system API expects. The
+/// handler may take the decoded message argument and may return a Transition
+/// stating how the message ended; the system wants neither.
+pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context) fn () void {
+    const info = @typeInfo(@TypeOf(func)).@"fn";
+
+    if (info.param_types.len == 0) {
+        return struct {
+            fn f() void {
+                beginMessage();
+                checkOutcome(outcomeOf(func, .{}));
+            }
+        }.f;
+    }
+
+    if (info.param_types.len != 1)
+        @compileError("an entry point takes at most one parameter, the decoded argument");
+
+    // Reading the argument means calling msg_arg_data, which the spec does
+    // not permit from every entry point. A pre_upgrade or timer handler has
+    // no argument to read and would trap at runtime.
+    if (!ic0_spec.allows("msg_arg_data_size", context))
+        @compileError("this entry point runs in a context with no message argument, " ++
+            "so its handler cannot take one");
+
+    const Arg = info.param_types[0] orelse
+        @compileError("an entry point may not take a generic parameter");
+
+    return struct {
+        fn f() void {
+            beginMessage();
+            const size: usize = @intCast(ic0.msg_arg_data_size());
+            const data = allocator.alloc(u8, size) catch
+                @panic("failed to allocate argument data");
+            defer allocator.free(data);
+            if (size > 0) ic0.msg_arg_data_copy(data.ptr, 0, @intCast(size));
+
+            checkOutcome(outcomeOf(func, .{codec.default.decode(Arg, data)}));
+        }
+    }.f;
+}
+
+// Null stands for an entry point returning void, which checkOutcome reads as
+// one that cannot state an outcome.
+fn outcomeOf(comptime func: anytype, args: anytype) ?Transition {
+    if (comptime @typeInfo(@TypeOf(func)).@"fn".return_type == void) {
+        @call(.auto, func, args);
+        return null;
+    }
+    return @call(.auto, func, args);
 }
 
 fn trap(message: []const u8) noreturn {

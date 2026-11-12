@@ -4,6 +4,43 @@ const builtin = @import("builtin");
 // i32 for wasm32, i64 for wasm64.
 pub const I = if (builtin.cpu.arch == .wasm64) i64 else i32;
 
+/// Where a System API call may be made from. The codes are the spec's own,
+/// listed against each function in ic0.spec.
+pub const Context = enum {
+    /// canister_init or canister_post_upgrade
+    I,
+    /// canister_pre_upgrade
+    G,
+    /// canister_update
+    U,
+    /// canister_query, replicated
+    RQ,
+    /// canister_query, non-replicated
+    NRQ,
+    /// canister_query, as a http outcall transform
+    TQ,
+    /// canister_composite_query
+    CQ,
+    /// reply callback
+    Ry,
+    /// reject callback
+    Rt,
+    /// reply callback in a composite query
+    CRy,
+    /// reject callback in a composite query
+    CRt,
+    /// cleanup callback
+    C,
+    /// cleanup callback in a composite query
+    CC,
+    /// canister_inspect_message
+    F,
+    /// system task: heartbeat, global timer, or on low wasm memory
+    T,
+    /// the (start) module initialization function
+    s,
+};
+
 // Message input/output
 pub extern "ic0" fn msg_arg_data_size() I;
 pub extern "ic0" fn msg_arg_data_copy(dst: [*]const u8, offset: I, size: I) void;
