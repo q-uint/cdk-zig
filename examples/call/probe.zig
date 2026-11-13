@@ -91,7 +91,25 @@ fn call_chained_trapping() tr.Transition {
     ) catch tr.reject("call_perform failed");
 }
 
+// A comptime-known callee has no runtime address, so its bytes must land
+// somewhere ic0.call_new can point. Not management_canister, which is empty
+// and needs no address. This canister does not exist, so the reject it earns
+// proves the bytes arrived.
+const absent = cdk.principal.comptimeFromText("tz2ag-zx777-77776-aaabq-cai");
+
+fn noSuchCanister(_: []const u8) tr.Transition {
+    return tr.reject("that canister was supposed to be absent");
+}
+
+fn call_comptime_callee() tr.Transition {
+    return tr.commit(
+        .{ .onReply = noSuchCanister },
+        .{ .callee = absent, .method = "greet" },
+    ) catch tr.reject("call_perform failed");
+}
+
 comptime {
+    cdk.update(call_comptime_callee, "call_comptime_callee");
     cdk.update(call_chained_rejecting, "call_chained_rejecting");
     cdk.update(call_chained_trapping, "call_chained_trapping");
     cdk.query(released_count, "greetings_freed");

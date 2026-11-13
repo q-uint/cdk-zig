@@ -4,6 +4,9 @@ const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
 
+// Mirrors probe.zig's `absent` by hand; probe.zig is wasm-only.
+const absent_callee = "tz2ag-zx777-77776-aaabq-cai";
+
 fn initPic() !pic.PocketIc {
     const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
     return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
@@ -287,6 +290,25 @@ test "call reaches its named continuation" {
 
     const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_greet", "");
     try expectReply(result, "hello from callee");
+}
+
+test "a comptime-known callee reaches the right canister" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+
+    const result = try pocket.updateCall(
+        caller_id,
+        cdk.principal.anonymous,
+        "call_comptime_callee",
+        "",
+    );
+    const msg = try expectReject(result);
+    defer allocator.free(msg);
+    // Naming the callee proves the bytes reached the system; a length check
+    // also passes on the probe's own rejects, including the never-left one.
+    try std.testing.expect(std.mem.indexOf(u8, msg, absent_callee) != null);
 }
 
 test "caller calls non-existent canister" {

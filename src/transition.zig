@@ -151,7 +151,10 @@ pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
         0;
     errdefer handlers.discard(env);
 
-    var callee = request.callee;
+    // A comptime-known `.callee` is a comptime field of the request literal,
+    // which has no runtime address for `.ptr` to take. Any comptime callee
+    // does this, not just comptimeFromText.
+    const callee = request.callee;
 
     ic0.call_new(
         callee.slice().ptr,

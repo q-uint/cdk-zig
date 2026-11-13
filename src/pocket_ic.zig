@@ -1000,6 +1000,13 @@ fn buildCanisterCallJson(
     return aw.toOwnedSlice();
 }
 
+const RejectResponse = struct {
+    reject_code: []const u8,
+    reject_message: []const u8,
+    error_code: []const u8,
+    certified: bool,
+};
+
 fn parseCanisterResult(allocator: Allocator, json_body: []const u8) !WasmResult {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_body, .{
         .allocate = .alloc_always,
@@ -1029,11 +1036,11 @@ fn parseCanisterResult(allocator: Allocator, json_body: []const u8) !WasmResult 
     }
 
     if (parsed.value.object.get("Err")) |err_val| {
-        const msg = if (err_val.object.get("description")) |d|
-            try allocator.dupe(u8, d.string)
-        else
-            try allocator.dupe(u8, "unknown error");
-        return .{ .reject = msg };
+        const rejection = std.json.parseFromValue(RejectResponse, allocator, err_val, .{}) catch
+            return error.InvalidCanisterResult;
+        defer rejection.deinit();
+
+        return .{ .reject = try allocator.dupe(u8, rejection.value.reject_message) };
     }
 
     return error.InvalidCanisterResult;
@@ -1226,8 +1233,20 @@ test "parseCanisterResult reject" {
     }
 }
 
+// Deliberately not RejectResponse: encoding with the type we decode with
+// would hide a rename from both sides at once.
+fn parseEncoded(value: anytype) !WasmResult {
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, value, .{});
+    defer testing.allocator.free(json);
+    return parseCanisterResult(testing.allocator, json);
+}
+
+// Captured from a live server. Do not generate it: that would make the
+// fixture agree with the parser by construction.
 test "parseCanisterResult error" {
-    const json = "{\"Err\":{\"description\":\"something broke\"}}";
+    const json =
+        \\{"Err":{"reject_code":"CanisterReject","reject_message":"No route to canister tz2ag-zx777-77776-aaabq-cai","error_code":"CanisterRejectedMessage","certified":true}}
+    ;
     const result = try parseCanisterResult(testing.allocator, json);
     switch (result) {
         .reply => |data| {
@@ -1236,9 +1255,30 @@ test "parseCanisterResult error" {
         },
         .reject => |msg| {
             defer testing.allocator.free(msg);
-            try testing.expectEqualStrings("something broke", msg);
+            try testing.expectEqualStrings(
+                "No route to canister tz2ag-zx777-77776-aaabq-cai",
+                msg,
+            );
         },
     }
+}
+
+test "parseCanisterResult error without a message" {
+    try testing.expectError(
+        error.InvalidCanisterResult,
+        parseEncoded(.{ .Err = .{ .reject_code = "SysFatal" } }),
+    );
+}
+
+// A server that adds a field fails here until RejectResponse is updated.
+test "parseCanisterResult error with an unexpected field" {
+    try testing.expectError(error.InvalidCanisterResult, parseEncoded(.{ .Err = .{
+        .reject_code = "CanisterReject",
+        .reject_message = "nope",
+        .error_code = "CanisterRejectedMessage",
+        .certified = true,
+        .future_field = 7,
+    } }));
 }
 
 test "parseCanisterResult invalid json" {
