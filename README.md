@@ -36,16 +36,14 @@ const cdk = @import("cdk");
 
 var counter: u32 = 0;
 
-fn increment() void {
+fn increment() u32 {
     counter += 1;
-    cdk.replyRaw(&std.mem.toBytes(counter));
+    return counter;
 }
 
-fn getCounter() void {
-    cdk.replyRaw(&std.mem.toBytes(counter));
+fn getCounter() u32 {
+    return counter;
 }
-
-const std = @import("std");
 
 comptime {
     cdk.update(increment, "increment");
@@ -64,8 +62,6 @@ zig build test     # run e2e tests via PocketIC
 
 ### Entry points
 
-Declare canister methods with comptime decorators:
-
 ```zig
 comptime {
     cdk.init(myInit);
@@ -80,13 +76,33 @@ comptime {
 }
 ```
 
-### Timers
+A handler takes at most one parameter, the decoded argument, and returns:
 
-Schedule one-shot and repeating timers:
+| Returns | Effect |
+|---------|--------|
+| `T` | reply with `T` |
+| `E!T` | reply with `T`, or reject with the error's name |
+| `cdk.Transition(T)` | reply, reject with any message, or send a call |
+| `void` | reply by hand with `cdk.replyRaw`, or not at all |
+
+The reply is encoded after the handler returns, so it must not point into
+the handler's stack.
+
+### Codecs
+
+The default codec, Raw, handles `[]const u8` and integers (little-endian).
+Declare another for everything else:
 
 ```zig
-const cdk = @import("cdk");
+pub const cdk_codec = cdk.CandidCodec;
+```
 
+Any type with `encode` and `decode` works. It covers arguments, replies and
+calls. `.codec` overrides it for one call.
+
+### Timers
+
+```zig
 fn init() void {
     // Fire once after 5 seconds.
     _ = cdk.timers.setTimer(5_000_000_000, myCallback);
@@ -104,60 +120,36 @@ comptime {
 
 ### Inter-canister calls
 
-A call commits canister state and ends the message. Its continuation runs as
-a separate message, so it is named up front rather than resumed inline:
+A call commits state and ends the message. The continuation runs as a
+separate message, so it is named up front:
 
 ```zig
-const cdk = @import("cdk");
-const tr = cdk.transition;
-
-fn replied(data: []const u8) tr.Transition {
-    return tr.replyRaw(data);
+fn replied(data: []const u8) cdk.Transition([]const u8) {
+    return .reply(data);
 }
 
-fn callOther() tr.Transition {
+fn callOther() cdk.Transition([]const u8) {
     const callee = comptime cdk.principal.comptimeFromText("aaaaa-aa");
-    return tr.commit(.{ .onReply = replied }, .{
+    return .commit(.{ .onReply = replied }, .{
         .callee = callee,
         .method = "some_method",
         .arg = "hello",
-    }) catch tr.reject("call failed");
+    });
 }
 ```
 
-The first struct is comptime, the second is the call, which also takes
-`.cycles` and `.timeout_seconds`. `commit` returns a `Transition` the entry
-point must return, so nothing can follow the call.
-
-`onReject` defaults to forwarding the callee's rejection. A continuation
-borrows its reply: the buffer is freed when it returns, so copy anything kept
-beyond that.
-
-Declare a codec to encode arguments and decode replies into types. Any format
-works that provides `encode` and `decode`:
-
-```zig
-pub const cdk_codec = cdk.CandidCodec;
-
-fn replied(greeting: Greeting) tr.Transition {
-    return tr.reply(greeting);
-}
-
-return tr.commit(.{ .onReply = replied }, .{
-    .callee = callee,
-    .method = "greet",
-    .arg = @as([]const u8, "world"),
-}) catch tr.reject("call failed");
-```
-
-`cdk_codec` covers entry point arguments, replies and calls alike. Pass
-`.codec` in the first struct to override it for one call, for a canister that
-talks to peers using different formats.
+- The first struct is comptime: `.onReply`, `.onReject` (defaults to
+  forwarding the callee's rejection), `.onError` (the call could not be sent,
+  defaults to rejecting), `.codec`.
+- The second is the call: `.callee`, `.method`, `.arg`, `.cycles`,
+  `.timeout_seconds`.
+- `.reply` only takes a `T`, and every continuation returns the same
+  `Transition(T)`, since it answers the same caller.
+- A continuation borrows its reply. Copy anything kept beyond it.
 
 ### Carrying state across a commit
 
-Anything the continuation needs is either re-read from canister state, or
-travels as `.pending`:
+What the continuation needs is re-read from state, or travels as `.pending`:
 
 ```zig
 const Transfer = struct {
@@ -169,12 +161,12 @@ const Transfer = struct {
     }
 };
 
-fn settled(pending: Transfer, block: u64) tr.Transition {
+fn settled(pending: Transfer, block: u64) cdk.Transition(u64) {
     credit(pending.to, block);
-    return tr.reply(block);
+    return .reply(block);
 }
 
-return tr.commit(.{
+return .commit(.{
     .onReply = settled,
     .onFinish = Transfer.deinit,
 }, .{
@@ -182,124 +174,90 @@ return tr.commit(.{
     .method = "transfer",
     .arg = args,
     .pending = Transfer{ .to = to, .amount = amount },
-}) catch tr.reject("call failed");
+});
 ```
 
-Carry intent, not observations. A balance or config read before the call is
-stale by the time the continuation runs. `Transfer` above records what was
-asked for, and `credit` re-reads what it needs.
+Carry intent, not observations: anything read before the call is stale by
+the time the continuation runs.
 
-The type comes from `onReply`'s first parameter, and `onReject` must match.
-`.onFinish` runs on whichever of reply, reject or cleanup happens, so state
-owning memory is freed exactly once. `.capacity` bounds how many such calls a
-call site may have in flight.
+The pending type is `onReply`'s first parameter. `.onFinish` runs on reply,
+reject or cleanup, so owned memory is freed exactly once. `.capacity` bounds
+how many such calls a call site may have in flight.
 
 ### Stable memory
 
-Persist data across upgrades with raw or streaming APIs:
-
 ```zig
-const cdk = @import("cdk");
-
 var counter: u64 = 0;
 
 fn save() void {
-    cdk.stableGrow(1);
-    cdk.stableWrite(0, &std.mem.toBytes(counter));
+    _ = cdk.stableGrow(1);
+    cdk.stableWrite(0, std.mem.asBytes(&counter));
 }
 
 fn restore() void {
     var buf: [8]u8 = undefined;
     cdk.stableRead(0, &buf);
-    counter = std.mem.bytesToValue(u64, &buf);
+    counter = std.mem.readInt(u64, &buf, .little);
+}
+
+comptime {
+    cdk.preUpgrade(save);
+    cdk.postUpgrade(restore);
 }
 ```
 
-The `cdk.stable` module also provides streaming `Writer` and `Reader` types
-that handle page allocation automatically. Stable memory works identically
-on both wasm32 and wasm64 targets.
+`cdk.stable.Writer` and `Reader` stream across pages and grow memory as
+needed.
 
 ### Candid encoding/decoding
 
-Encode and decode Candid values with automatic type mapping:
+With `CandidCodec` as the codec, handlers take and return Zig types:
 
 ```zig
-const cdk = @import("cdk");
-const candid = cdk.candid;
+pub const cdk_codec = cdk.CandidCodec;
 
-const Greeting = struct {
-    name: []const u8,
-    tags: []const []const u8,
-};
+const Greeting = struct { greeting: []const u8 };
 
-fn greet() void {
-    const data = cdk.argData();
-
-    // Option 1: decodeOwned returns a Decoded(T) with a deinit method
-    // that recursively frees all nested allocations.
-    var result = candid.decodeOwned(Greeting, cdk.allocator, data) catch
-        @panic("decode failed");
-    defer result.deinit();
-
-    const reply = candid.encode(cdk.allocator, .{result.value}) catch
-        @panic("encode failed");
-    cdk.replyRaw(reply);
+fn greet(name: []const u8) Greeting {
+    return .{ .greeting = name };
 }
 ```
 
-`decodeOwned` returns a `Decoded(T)` wrapper whose `deinit()` recursively
-frees all decoder-allocated memory (slices, pointers, principals, blobs).
+For direct control, `cdk.candid` has `encode`, `decode`/`freeDecoded`, and
+`decodeOwned`, which returns a value with a recursive `deinit`.
 
-For cases where you need direct control, use `decode` with `freeDecoded`:
-
-```zig
-const val = candid.decode(Greeting, allocator, data) catch @panic("decode failed");
-defer candid.freeDecoded(Greeting, allocator, val);
-```
-
-Supported types: `bool`, integers (`u8`-`u128`, `i8`-`i128`), floats
-(`f32`, `f64`), `[]const u8` (text), optionals, slices (vec), structs
-(record), tagged unions (variant), `Principal`, `Blob`, `Service`, and
-func types.
+Supported: `bool`, integers, floats, `[]const u8` (text), optionals, slices
+(vec), structs (record), tagged unions (variant), `Principal`, `Blob`,
+`Service` and func types.
 
 ### Profiling
-
-Enable compile-time profiling with zero overhead when disabled:
 
 ```zig
 pub const cdk_profiling = true;
 ```
 
-This automatically instruments all entry points and exposes profiling
-endpoints for fetching trace data. Generate flamegraphs from PocketIC tests
-to visualize instruction costs, heap growth, and stable memory usage.
-
-See [examples/profiling/](examples/profiling/) for details.
+Instruments every entry point and exposes endpoints for trace data, for
+flamegraphs of instructions, heap and stable memory. Free when disabled. See
+[examples/profiling](examples/profiling/).
 
 ## Build helpers
 
-The CDK provides two build-system functions importable via `@import("cdk")`:
-
-- **`addCanister(b, dep, name, options)`** -- builds a
-  canister from `{name}.zig`, with `ReleaseSmall`
-  optimization, entry disabled, and rdynamic enabled. Targets
-  `wasm32-freestanding` by default; pass `.{ .wasm64 = true }` for
-  `wasm64-freestanding`. Returns the `*Compile` step for further
-  customization.
-
-- **`addTests(b, dep)`** -- sets up an e2e test step that compiles
-  `test.zig` with the `pocket-ic` module and depends on the install step.
-  Returns the `*Run` step for chaining additional steps.
+- `addCanister(b, dep, name, options)` builds `{name}.zig` to
+  `wasm32-freestanding`, or wasm64 with `.{ .wasm64 = true }`. Returns the
+  `*Compile` step.
+- `addTests(b, dep)` adds a `test` step running `test.zig` against PocketIC.
+  Returns the `*Run` step.
 
 ## Examples
 
 | Example | Description |
 |---------|-------------|
-| [call](examples/call/) | Inter-canister calls with callback-based futures |
+| [call](examples/call/) | Inter-canister calls, chained, with pending state |
 | [candid](examples/candid/) | Candid-encoded arguments and replies |
-| [timers](examples/timers/) | One-shot and repeating timer scheduling |
-| [stable](examples/stable/) | Stable memory persistence across upgrades |
-| [profiling](examples/profiling/) | Instruction profiling and flamegraph generation |
+| [certified_data](examples/certified_data/) | Certified data with a hash tree |
+| [timers](examples/timers/) | One-shot and repeating timers |
+| [stable](examples/stable/) | Stable memory, raw and streaming, across upgrades |
+| [profiling](examples/profiling/) | Instruction profiling and flamegraphs |
 
 ## Development
 
