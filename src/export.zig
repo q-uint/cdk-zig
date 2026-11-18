@@ -12,11 +12,21 @@ pub fn init(comptime func: anytype) void {
 }
 
 pub fn query(comptime func: anytype, name: []const u8) void {
-    @export(&callConvWrapper(profiling.traced(entryPoint(func, .RQ), name)), .{ .name = "canister_query " ++ name });
+    queryWith(codec.default, func, name);
 }
 
 pub fn update(comptime func: anytype, name: []const u8) void {
-    @export(&callConvWrapper(profiling.traced(entryPoint(func, .U), name)), .{ .name = "canister_update " ++ name });
+    updateWith(codec.default, func, name);
+}
+
+/// A query whose argument and reply use `Codec` rather than `cdk_codec`.
+pub fn queryWith(comptime Codec: type, comptime func: anytype, name: []const u8) void {
+    @export(&callConvWrapper(profiling.traced(transition.entryPoint(func, .RQ, Codec), name)), .{ .name = "canister_query " ++ name });
+}
+
+/// An update whose argument and reply use `Codec` rather than `cdk_codec`.
+pub fn updateWith(comptime Codec: type, comptime func: anytype, name: []const u8) void {
+    @export(&callConvWrapper(profiling.traced(transition.entryPoint(func, .U, Codec), name)), .{ .name = "canister_update " ++ name });
 }
 
 pub fn preUpgrade(comptime func: anytype) void {

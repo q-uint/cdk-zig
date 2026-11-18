@@ -76,24 +76,28 @@ fn checkOutcome(outcome: ?Outcome) void {
 /// A continuation answers the caller of the message that sent the call, so
 /// `commit` requires its handlers to return the same `Transition`.
 pub fn Transition(comptime ReplyType: type) type {
+    return TransitionWith(codec.default, ReplyType);
+}
+
+/// A `Transition` whose replies are encoded with `ReplyCodec` rather than the
+/// canister's `cdk_codec`, for an entry point exported with that codec.
+pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type {
     return struct {
         outcome: Outcome,
 
         const Self = @This();
 
-        /// What this message replies with.
+        /// What this message replies with, and how it is encoded.
         pub const Reply = ReplyType;
+        pub const Codec = ReplyCodec;
 
-        /// Reply with a value encoded by the canister's `cdk_codec`, the same
-        /// format entry point arguments are decoded with.
         pub fn reply(value: Reply) Self {
-            return replyRaw(codec.default.encode(Reply, value));
+            return replyRaw(Codec.encode(memory.scratch, Reply, value));
         }
 
-        /// Reply with a value in a format other than the canister's
-        /// `cdk_codec`.
-        pub fn replyWith(comptime Codec: type, value: Reply) Self {
-            return replyRaw(Codec.encode(Reply, value));
+        /// Reply in a format other than `Codec`.
+        pub fn replyWith(comptime Other: type, value: Reply) Self {
+            return replyRaw(Other.encode(memory.scratch, Reply, value));
         }
 
         /// Reply with bytes as they are. Nothing checks they encode a `Reply`.
@@ -183,7 +187,9 @@ pub fn Transition(comptime ReplyType: type) type {
 
             const Spec = @TypeOf(spec);
             const Request = @TypeOf(request);
-            const Codec = if (@hasField(Spec, "codec")) spec.codec else codec.default;
+            // The call's wire format, which may differ from the one this
+            // message replies in.
+            const CallCodec = if (@hasField(Spec, "codec")) spec.codec else codec.default;
             const capacity = if (@hasField(Spec, "capacity")) spec.capacity else default_capacity;
             const onReject = if (@hasField(Spec, "onReject"))
                 spec.onReject
@@ -191,7 +197,7 @@ pub fn Transition(comptime ReplyType: type) type {
                 defaultReject(shapeOf(spec.onReply, "onReply", Self).Pending);
 
             const onFinish = if (@hasField(Spec, "onFinish")) spec.onFinish else null;
-            const handlers = Handlers(Self, Codec, spec.onReply, onReject, onFinish, capacity);
+            const handlers = Handlers(Self, CallCodec, spec.onReply, onReject, onFinish, capacity);
 
             if (handlers.carries_pending != @hasField(Request, "pending")) {
                 @compileError(if (handlers.carries_pending)
@@ -227,7 +233,7 @@ pub fn Transition(comptime ReplyType: type) type {
             }
 
             if (@hasField(Request, "arg")) {
-                const payload = Codec.encode(@TypeOf(request.arg), request.arg);
+                const payload = CallCodec.encode(memory.scratch, @TypeOf(request.arg), request.arg);
                 if (payload.len > 0) ic0.call_data_append(payload.ptr, @intCast(payload.len));
             }
             if (@hasField(Request, "cycles")) {
@@ -245,9 +251,10 @@ pub fn Transition(comptime ReplyType: type) type {
     };
 }
 
-/// Whether `T` is some `Transition(R)`.
+/// Whether `T` is some `TransitionWith(C, R)`, `Transition(R)` included.
 pub fn isTransition(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "Reply") and T == Transition(T.Reply);
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "Reply") and @hasDecl(T, "Codec") and
+        T == TransitionWith(T.Codec, T.Reply);
 }
 
 const Shape = struct {
@@ -368,7 +375,7 @@ fn Handlers(
             beginMessage();
             defer memory.endMessage();
             const pending = take(env);
-            const decoded = Codec.decode(Reply, readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy));
+            const decoded = Codec.decode(memory.scratch, Reply, readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy));
             if (comptime carries_pending) {
                 defer finish(pending);
                 checkOutcome(invoke(onReply, .{ pending, decoded }).outcome);
@@ -428,6 +435,13 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptim
                 @typeName(Returns));
     }
 
+    // .reply encodes with the Transition's codec, which must be the one the
+    // entry point decodes its argument with.
+    if (isTransition(Returns) and Returns.Codec != Codec)
+        @compileError("this entry point speaks " ++ @typeName(Codec) ++ ", so it returns " ++
+            "TransitionWith(" ++ @typeName(Codec) ++ ", " ++ @typeName(Returns.Reply) ++
+            "), not " ++ @typeName(Returns));
+
     // Rejecting is allowed wherever replying is, so one check covers both.
     if (Returns != void and !ic0_spec.allows("msg_reply", context))
         @compileError("this entry point runs in a context that cannot reply, " ++
@@ -463,7 +477,7 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptim
             beginMessage();
             defer memory.endMessage();
             const data = readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy);
-            checkOutcome(outcomeOf(func, Codec, .{Codec.decode(Arg, data)}));
+            checkOutcome(outcomeOf(func, Codec, .{Codec.decode(memory.scratch, Arg, data)}));
         }
     }.f;
 }
@@ -478,12 +492,12 @@ fn outcomeOf(comptime func: anytype, comptime Codec: type, args: anytype) ?Outco
     }
     if (comptime isTransition(Returns)) return invoke(func, args).outcome;
     if (comptime @typeInfo(Returns) == .error_union) {
-        const T = Transition(@typeInfo(Returns).error_union.payload);
+        const T = TransitionWith(Codec, @typeInfo(Returns).error_union.payload);
         const value = invoke(func, args) catch |err|
             return T.reject(@errorName(err)).outcome;
-        return T.replyWith(Codec, value).outcome;
+        return T.reply(value).outcome;
     }
-    return Transition(Returns).replyWith(Codec, invoke(func, args)).outcome;
+    return TransitionWith(Codec, Returns).reply(invoke(func, args)).outcome;
 }
 
 // Copies the message's argument or reject text into scratch memory, which

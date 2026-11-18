@@ -2,15 +2,13 @@
 //!
 //! Any format works, Candid, CBOR, protobuf, as long as it provides:
 //!
-//!     fn encode(comptime T: type, value: T) []const u8
-//!     fn decode(comptime T: type, bytes: []const u8) T
+//!     fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8
+//!     fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) T
 //!
-//! Both should allocate from `cdk.scratch`, which the CDK frees when the
-//! message ends.
+//! `a` is freed when the message ends, so neither needs to free anything.
 
 const std = @import("std");
 const root = @import("root");
-const scratch = @import("allocator.zig").scratch;
 
 /// Declare `cdk_codec` in your root source file to change it:
 ///
@@ -19,15 +17,15 @@ pub const default = if (@hasDecl(root, "cdk_codec")) root.cdk_codec else Raw;
 
 /// Bytes as they are, and integers as little-endian bytes of their own size.
 pub const Raw = struct {
-    pub fn encode(comptime T: type, value: T) []const u8 {
+    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8 {
         if (comptime isBytes(T)) return value;
         comptime checkInt(T);
-        const out = scratch.alloc(u8, @sizeOf(T)) catch @panic("raw: out of memory");
+        const out = a.alloc(u8, @sizeOf(T)) catch @panic("raw: out of memory");
         std.mem.writeInt(T, out[0..@sizeOf(T)], value, .little);
         return out;
     }
 
-    pub fn decode(comptime T: type, bytes: []const u8) T {
+    pub fn decode(_: std.mem.Allocator, comptime T: type, bytes: []const u8) T {
         if (comptime T == []const u8) return bytes;
         comptime checkInt(T);
         if (bytes.len != @sizeOf(T))

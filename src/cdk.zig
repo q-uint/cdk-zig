@@ -6,6 +6,7 @@ pub const ic0 = @import("ic0.zig");
 pub const ic0_spec = @import("ic0_spec.zig");
 pub const transition = @import("transition.zig");
 pub const Transition = transition.Transition;
+pub const TransitionWith = transition.TransitionWith;
 pub const stable = @import("stable/stable.zig");
 pub const candid = @import("candid/candid.zig");
 const exp = @import("export.zig");
@@ -16,7 +17,6 @@ pub const timers = @import("timers.zig");
 pub const profiling = @import("profiling.zig");
 
 const allocator = @import("allocator.zig").default;
-const scratch = @import("allocator.zig").scratch;
 
 /// For memory that outlives the message: canister state, and pending state
 /// carried across a call. Whatever is allocated here must be freed by hand.
@@ -28,14 +28,17 @@ pub const persistent = allocator;
 
 pub const assert = @import("assert.zig").assert;
 
+/// The default `cdk_codec`: bytes as they are, integers little-endian.
+pub const RawCodec = @import("codec.zig").Raw;
+
 pub const CandidCodec = struct {
-    pub fn encode(comptime T: type, value: T) []const u8 {
-        return candid.encode(scratch, .{value}) catch
+    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8 {
+        return candid.encode(a, .{value}) catch
             @panic("candid encode failed");
     }
 
-    pub fn decode(comptime T: type, bytes: []const u8) T {
-        return candid.decode(T, scratch, bytes) catch
+    pub fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) T {
+        return candid.decode(T, a, bytes) catch
             @panic("candid decode failed");
     }
 };
@@ -44,6 +47,8 @@ pub const CandidCodec = struct {
 pub const init = exp.init;
 pub const query = exp.query;
 pub const update = exp.update;
+pub const queryWith = exp.queryWith;
+pub const updateWith = exp.updateWith;
 pub const preUpgrade = exp.preUpgrade;
 pub const postUpgrade = exp.postUpgrade;
 pub const heartbeat = exp.heartbeat;

@@ -1,0 +1,13 @@
+.{
+    .name = .json,
+    .version = "0.0.0",
+    .fingerprint = 0x6b072545cd56f57e,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "json.zig",
+    },
+}

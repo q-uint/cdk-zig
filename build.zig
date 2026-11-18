@@ -163,6 +163,7 @@ const examples = [_][]const u8{
     "call",
     "candid",
     "certified_data",
+    "json",
     "profiling",
     "stable",
     "timers",

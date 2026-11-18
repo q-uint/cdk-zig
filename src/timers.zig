@@ -38,16 +38,14 @@ pub fn cancelAll() void {
 //       cdk.globalTimer(cdk.timers.processTimers);
 //   }
 //
-pub fn processTimers() void {
+pub fn processTimers(scratch: std.mem.Allocator) void {
     const now: u64 = @intCast(ic0.time());
 
     // Collect expired timer IDs to avoid modifying the map during iteration.
     var expired: std.ArrayListUnmanaged(TimerId) = .empty;
-    defer expired.deinit(allocator);
-
     for (map.keys(), map.values()) |id, t| {
         if (t.deadline <= now) {
-            expired.append(allocator, id) catch
+            expired.append(scratch, id) catch
                 @panic("failed to allocate expired timer list");
         }
     }

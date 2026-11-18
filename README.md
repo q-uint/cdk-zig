@@ -108,8 +108,16 @@ Declare another for everything else:
 pub const cdk_codec = cdk.CandidCodec;
 ```
 
-Any type with `encode` and `decode` works. It covers arguments, replies and
-calls. `.codec` overrides it for one call.
+Any type with these works:
+
+```zig
+fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8
+fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) T
+```
+
+`a` is freed when the message ends. The codec covers arguments, replies and
+calls. `cdk.queryWith(Codec, f, name)` and `cdk.updateWith` override it for
+one endpoint, `.codec` for one call. See [examples/json](examples/json/).
 
 ### Timers
 
@@ -267,6 +275,7 @@ flamegraphs of instructions, heap and stable memory. Free when disabled. See
 | [call](examples/call/) | Inter-canister calls, chained, with pending state |
 | [candid](examples/candid/) | Candid-encoded arguments and replies |
 | [certified_data](examples/certified_data/) | Certified data with a hash tree |
+| [json](examples/json/) | A custom JSON codec, and a Raw endpoint beside it |
 | [timers](examples/timers/) | One-shot and repeating timers |
 | [stable](examples/stable/) | Stable memory, raw and streaming, across upgrades |
 | [profiling](examples/profiling/) | Instruction profiling and flamegraphs |
