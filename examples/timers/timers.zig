@@ -19,10 +19,8 @@ fn increment() void {
     counter += 1;
 }
 
-fn getCounter() void {
-    var buf: [4]u8 = undefined;
-    @memcpy(&buf, &std.mem.toBytes(counter));
-    cdk.replyRaw(&buf);
+fn getCounter() u32 {
+    return counter;
 }
 
 fn stopInterval() void {
@@ -32,8 +30,6 @@ fn stopInterval() void {
     }
     cdk.replyRaw("");
 }
-
-const std = @import("std");
 
 comptime {
     cdk.init(init);

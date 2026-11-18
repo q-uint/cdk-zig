@@ -1,11 +1,11 @@
 const cdk = @import("cdk");
 
-fn greet() void {
-    cdk.replyRaw("hello from callee");
+fn greet() []const u8 {
+    return "hello from callee";
 }
 
-fn farewell() void {
-    cdk.replyRaw("goodbye from callee");
+fn farewell() []const u8 {
+    return "goodbye from callee";
 }
 
 comptime {

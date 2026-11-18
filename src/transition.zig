@@ -5,6 +5,10 @@
 //! changed, with no `msg_caller`. So a call names its continuation up front
 //! and yields a `Transition`, which the calling function must return. Nothing
 //! can follow it, and nothing is carried across the commit.
+//!
+//! `Transition(R)` puts the reply type in the signature, so the payload handed
+//! to `.reply` and the continuations of every call the message sends are
+//! checked against it.
 
 const std = @import("std");
 const codec = @import("codec.zig");
@@ -32,7 +36,7 @@ else
     64;
 
 /// How a message execution ended.
-pub const Transition = enum(u8) {
+pub const Outcome = enum(u8) {
     replied,
     rejected,
     sent,
@@ -51,7 +55,7 @@ fn beginMessage() void {
 
 // A message that sent a call must end by returning that call's Transition,
 // or its continuation will arrive and respond a second time.
-fn checkOutcome(outcome: ?Transition) void {
+fn checkOutcome(outcome: ?Outcome) void {
     if (!call_performed) return;
     const settled = outcome orelse
         trap("cdk: an entry point returning void sent a call, it must return a Transition");
@@ -59,134 +63,189 @@ fn checkOutcome(outcome: ?Transition) void {
         trap("cdk: a call was sent but its Transition was not returned");
 }
 
-pub fn replyRaw(payload: []const u8) Transition {
-    if (payload.len != 0) {
-        ic0.msg_reply_data_append(payload.ptr, @intCast(payload.len));
-    }
-    ic0.msg_reply();
-    return .replied;
-}
-
-/// Reply with a value encoded by the canister's `cdk_codec`, the same format
-/// entry point arguments are decoded with.
-pub fn reply(value: anytype) Transition {
-    return replyRaw(codec.default.encode(@TypeOf(value), value));
-}
-
-/// Reply with a value in a format other than the canister's `cdk_codec`.
-pub fn replyWith(comptime Codec: type, value: anytype) Transition {
-    return replyRaw(Codec.encode(@TypeOf(value), value));
-}
-
-pub fn reject(message: []const u8) Transition {
-    ic0.msg_reject(message.ptr, @intCast(message.len));
-    return .rejected;
-}
-
-/// Default `onReject`, passes the callee's reject message on to our caller.
-pub fn forwardReject(rejection: Rejection) Transition {
-    return reject(rejection.message);
-}
-
-// The default has to match onReply's arity, so it is generated against the
-// pending type rather than written once.
-fn defaultReject(comptime Pending: type) if (Pending == void)
-    fn (Rejection) Transition
-else
-    fn (Pending, Rejection) Transition {
-    if (Pending == void) return forwardReject;
+/// How a message that replies with `ReplyType` ended.
+///
+/// Handlers state their reply type in their signature, and the constructors
+/// are reached through decl literals:
+///
+///     fn get(index: u64) tr.Transition([]const u8) {
+///         if (index >= items.len) return .reject("index out of range");
+///         return .reply(items[index]);
+///     }
+///
+/// A continuation answers the caller of the message that sent the call, so
+/// `commit` requires its handlers to return the same `Transition`.
+pub fn Transition(comptime ReplyType: type) type {
     return struct {
-        fn f(_: Pending, rejection: Rejection) Transition {
+        outcome: Outcome,
+
+        const Self = @This();
+
+        /// What this message replies with.
+        pub const Reply = ReplyType;
+
+        /// Reply with a value encoded by the canister's `cdk_codec`, the same
+        /// format entry point arguments are decoded with.
+        pub fn reply(value: Reply) Self {
+            return replyRaw(codec.default.encode(Reply, value));
+        }
+
+        /// Reply with a value in a format other than the canister's
+        /// `cdk_codec`.
+        pub fn replyWith(comptime Codec: type, value: Reply) Self {
+            return replyRaw(Codec.encode(Reply, value));
+        }
+
+        /// Reply with bytes as they are. Nothing checks they encode a `Reply`.
+        pub fn replyRaw(payload: []const u8) Self {
+            if (payload.len != 0) {
+                ic0.msg_reply_data_append(payload.ptr, @intCast(payload.len));
+            }
+            ic0.msg_reply();
+            return .{ .outcome = .replied };
+        }
+
+        pub fn reject(message: []const u8) Self {
+            ic0.msg_reject(message.ptr, @intCast(message.len));
+            return .{ .outcome = .rejected };
+        }
+
+        /// Default `onReject`, passes the callee's reject message on to our
+        /// caller.
+        pub fn forwardReject(rejection: Rejection) Self {
             return reject(rejection.message);
         }
-    }.f;
+
+        /// Default `onError`, rejects with a message naming the error.
+        pub fn rejectError(err: Error) Self {
+            return reject(switch (err) {
+                Error.CallPerformFailed => "cdk: call_perform failed",
+                Error.TooManyCallsInFlight => "cdk: too many calls in flight",
+            });
+        }
+
+        // The default has to match onReply's arity, so it is generated
+        // against the pending type rather than written once.
+        fn defaultReject(comptime Pending: type) if (Pending == void)
+            fn (Rejection) Self
+        else
+            fn (Pending, Rejection) Self {
+            if (Pending == void) return forwardReject;
+            return struct {
+                fn f(_: Pending, rejection: Rejection) Self {
+                    return reject(rejection.message);
+                }
+            }.f;
+        }
+
+        /// Send a call and end this message.
+        ///
+        /// `spec` is comptime, because a continuation's address is needed to
+        /// name it to the system:
+        ///
+        ///     .codec     wire format, defaults to the canister's cdk_codec
+        ///     .onReply   fn (Reply) Self, optionally preceded by pending state
+        ///     .onReject  fn (Rejection) Self, defaults to forwardReject
+        ///     .onError   fn (Error) Self, runs instead when the call is never
+        ///                sent, defaults to rejectError
+        ///     .onFinish  fn (Pending) void, runs on every exit
+        ///     .capacity  calls carrying pending state that may be in flight
+        ///
+        /// Every handler returns `Self`, since it answers the caller of the
+        /// message that sent the call.
+        ///
+        /// A continuation borrows its reply or rejection for the duration of
+        /// the call. The buffer is freed when it returns, so anything kept
+        /// beyond that must be copied.
+        ///
+        /// `request` is runtime:
+        ///
+        ///     .callee    .method    .arg    .pending    .cycles
+        ///     .timeout_seconds
+        pub fn commit(comptime spec: anytype, request: anytype) Self {
+            comptime checkFields(@TypeOf(spec), &.{
+                "codec", "onReply", "onReject", "onError", "onFinish", "capacity",
+            });
+            const onError = if (@hasField(@TypeOf(spec), "onError")) spec.onError else rejectError;
+            if (@TypeOf(onError) != fn (Error) Self)
+                @compileError("onError must be fn (Error) " ++ @typeName(Self));
+
+            send(spec, request) catch |err| return onError(err);
+            return .{ .outcome = .sent };
+        }
+
+        fn send(comptime spec: anytype, request: anytype) Error!void {
+            comptime checkFields(@TypeOf(request), &.{
+                "callee", "method", "arg", "pending", "cycles", "timeout_seconds",
+            });
+
+            const Spec = @TypeOf(spec);
+            const Request = @TypeOf(request);
+            const Codec = if (@hasField(Spec, "codec")) spec.codec else codec.default;
+            const capacity = if (@hasField(Spec, "capacity")) spec.capacity else default_capacity;
+            const onReject = if (@hasField(Spec, "onReject"))
+                spec.onReject
+            else
+                defaultReject(shapeOf(spec.onReply, "onReply", Self).Pending);
+
+            const onFinish = if (@hasField(Spec, "onFinish")) spec.onFinish else null;
+            const handlers = Handlers(Self, Codec, spec.onReply, onReject, onFinish, capacity);
+
+            if (handlers.carries_pending != @hasField(Request, "pending")) {
+                @compileError(if (handlers.carries_pending)
+                    "onReply takes pending state, so the request needs a .pending field"
+                else
+                    "onReply takes no pending state, so .pending has nowhere to go");
+            }
+
+            const env: ic0.I = if (comptime handlers.carries_pending)
+                try handlers.put(request.pending)
+            else
+                0;
+            errdefer handlers.discard(env);
+
+            // A comptime-known `.callee` is a comptime field of the request
+            // literal, which has no runtime address for `.ptr` to take. Any
+            // comptime callee does this, not just comptimeFromText.
+            const callee = request.callee;
+
+            ic0.call_new(
+                callee.slice().ptr,
+                @intCast(callee.len),
+                request.method.ptr,
+                @intCast(request.method.len),
+                funcIdx(handlers.replyCallback),
+                env,
+                funcIdx(handlers.rejectCallback),
+                env,
+            );
+
+            if (handlers.carries_pending) {
+                ic0.call_on_cleanup(funcIdx(handlers.cleanupCallback), env);
+            }
+
+            if (@hasField(Request, "arg")) {
+                const payload = Codec.encode(@TypeOf(request.arg), request.arg);
+                if (payload.len > 0) ic0.call_data_append(payload.ptr, @intCast(payload.len));
+            }
+            if (@hasField(Request, "cycles")) {
+                const high: i64 = @bitCast(@as(u64, @truncate(request.cycles >> 64)));
+                const low: i64 = @bitCast(@as(u64, @truncate(request.cycles)));
+                ic0.call_cycles_add128(high, low);
+            }
+            if (@hasField(Request, "timeout_seconds")) {
+                ic0.call_with_best_effort_response(@intCast(request.timeout_seconds));
+            }
+
+            if (ic0.call_perform() != 0) return Error.CallPerformFailed;
+            call_performed = true;
+        }
+    };
 }
 
-/// Send a call and end this message.
-///
-/// `spec` is comptime, because a continuation's address is needed to name it
-/// to the system:
-///
-///     .codec     wire format, defaults to Raw
-///     .onReply   fn (Reply) Transition
-///     .onReject  fn (Rejection) Transition, defaults to forwardReject
-///
-/// A continuation borrows its reply or rejection for the duration of the
-/// call. The buffer is freed when it returns, so anything kept beyond that
-/// must be copied.
-///
-/// `request` is runtime:
-///
-///     .callee    .method    .arg    .cycles    .timeout_seconds
-pub fn commit(comptime spec: anytype, request: anytype) Error!Transition {
-    comptime checkFields(@TypeOf(spec), &.{
-        "codec", "onReply", "onReject", "onFinish", "capacity",
-    });
-    comptime checkFields(@TypeOf(request), &.{
-        "callee", "method", "arg", "pending", "cycles", "timeout_seconds",
-    });
-
-    const Spec = @TypeOf(spec);
-    const Request = @TypeOf(request);
-    const Codec = if (@hasField(Spec, "codec")) spec.codec else codec.default;
-    const capacity = if (@hasField(Spec, "capacity")) spec.capacity else default_capacity;
-    const onReject = if (@hasField(Spec, "onReject"))
-        spec.onReject
-    else
-        defaultReject(shapeOf(spec.onReply, "onReply").Pending);
-
-    const onFinish = if (@hasField(Spec, "onFinish")) spec.onFinish else null;
-    const handlers = Handlers(Codec, spec.onReply, onReject, onFinish, capacity);
-
-    if (handlers.carries_pending != @hasField(Request, "pending")) {
-        @compileError(if (handlers.carries_pending)
-            "onReply takes pending state, so the request needs a .pending field"
-        else
-            "onReply takes no pending state, so .pending has nowhere to go");
-    }
-
-    const env: ic0.I = if (comptime handlers.carries_pending)
-        try handlers.put(request.pending)
-    else
-        0;
-    errdefer handlers.discard(env);
-
-    // A comptime-known `.callee` is a comptime field of the request literal,
-    // which has no runtime address for `.ptr` to take. Any comptime callee
-    // does this, not just comptimeFromText.
-    const callee = request.callee;
-
-    ic0.call_new(
-        callee.slice().ptr,
-        @intCast(callee.len),
-        request.method.ptr,
-        @intCast(request.method.len),
-        funcIdx(handlers.replyCallback),
-        env,
-        funcIdx(handlers.rejectCallback),
-        env,
-    );
-
-    if (handlers.carries_pending) {
-        ic0.call_on_cleanup(funcIdx(handlers.cleanupCallback), env);
-    }
-
-    if (@hasField(@TypeOf(request), "arg")) {
-        const payload = Codec.encode(@TypeOf(request.arg), request.arg);
-        if (payload.len > 0) ic0.call_data_append(payload.ptr, @intCast(payload.len));
-    }
-    if (@hasField(@TypeOf(request), "cycles")) {
-        const high: i64 = @bitCast(@as(u64, @truncate(request.cycles >> 64)));
-        const low: i64 = @bitCast(@as(u64, @truncate(request.cycles)));
-        ic0.call_cycles_add128(high, low);
-    }
-    if (@hasField(@TypeOf(request), "timeout_seconds")) {
-        ic0.call_with_best_effort_response(@intCast(request.timeout_seconds));
-    }
-
-    if (ic0.call_perform() != 0) return Error.CallPerformFailed;
-    call_performed = true;
-    return .sent;
+/// Whether `T` is some `Transition(R)`.
+pub fn isTransition(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "Reply") and T == Transition(T.Reply);
 }
 
 const Shape = struct {
@@ -201,12 +260,14 @@ const Shape = struct {
     }
 };
 
-fn shapeOf(comptime handler: anytype, comptime name: []const u8) Shape {
+fn shapeOf(comptime handler: anytype, comptime name: []const u8, comptime Returns: type) Shape {
     const info = @typeInfo(@TypeOf(handler));
     if (info != .@"fn") @compileError(name ++ " must be a function");
 
     const f = info.@"fn";
-    if (f.return_type != Transition) @compileError(name ++ " must return Transition");
+    if (f.return_type != Returns)
+        @compileError(name ++ " must return " ++ @typeName(Returns) ++
+            ", the Transition of the message that sent the call");
 
     const generic = name ++ " may not take a generic parameter";
     return switch (f.param_types.len) {
@@ -224,17 +285,18 @@ fn shapeOf(comptime handler: anytype, comptime name: []const u8) Shape {
 // pointer, so a callback arriving after an upgrade finds a zeroed slot and
 // traps deliberately instead of reading whatever now occupies that address.
 fn Handlers(
+    comptime T: type,
     comptime Codec: type,
     comptime onReply: anytype,
     comptime onReject: anytype,
     comptime onFinish: anytype,
     comptime capacity: u16,
 ) type {
-    const shape = shapeOf(onReply, "onReply");
+    const shape = shapeOf(onReply, "onReply", T);
     const Reply = shape.Payload;
     const Pending = shape.Pending;
 
-    const reject_shape = shapeOf(onReject, "onReject");
+    const reject_shape = shapeOf(onReject, "onReject", T);
     if (reject_shape.Payload != Rejection)
         @compileError("onReject's last parameter must be Rejection");
     if (reject_shape.Pending != Pending)
@@ -298,9 +360,9 @@ fn Handlers(
             const decoded = Codec.decode(Reply, data);
             if (comptime carries_pending) {
                 defer finish(pending);
-                checkOutcome(onReply(pending, decoded));
+                checkOutcome(onReply(pending, decoded).outcome);
             } else {
-                checkOutcome(onReply(decoded));
+                checkOutcome(onReply(decoded).outcome);
             }
         }
 
@@ -319,9 +381,9 @@ fn Handlers(
             };
             if (comptime carries_pending) {
                 defer finish(pending);
-                checkOutcome(onReject(pending, rejection));
+                checkOutcome(onReject(pending, rejection).outcome);
             } else {
-                checkOutcome(onReject(rejection));
+                checkOutcome(onReject(rejection).outcome);
             }
         }
 
@@ -336,9 +398,31 @@ fn Handlers(
 
 /// Wraps a canister entry point into the shape the system API expects. The
 /// handler may take the decoded message argument and may return a Transition
-/// stating how the message ended; the system wants neither.
+/// stating how the message ended; the system wants neither. Both are in the
+/// handler's signature, so every entry point's argument and reply types are
+/// known at compile time.
+///
+/// A handler that sends no call can return the value itself. Anything other
+/// than `void` or a `Transition` is encoded with `cdk_codec` and sent as the
+/// reply, the same as returning `.reply(value)`. Returned as an error union,
+/// an error rejects the message with the error's name. A `Transition` is only
+/// needed to send a call, or to reject with text other than an error name.
 pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context) fn () void {
     const info = @typeInfo(@TypeOf(func)).@"fn";
+    const Returns = info.return_type orelse
+        @compileError("an entry point may not have a generic return type");
+
+    if (@typeInfo(Returns) == .error_union) {
+        const Value = @typeInfo(Returns).error_union.payload;
+        if (Value == void or isTransition(Value))
+            @compileError("an entry point may return an error union only of a reply value, not " ++
+                @typeName(Returns));
+    }
+
+    // Rejecting is allowed wherever replying is, so one check covers both.
+    if (Returns != void and !ic0_spec.allows("msg_reply", context))
+        @compileError("this entry point runs in a context that cannot reply, " ++
+            "so its handler must return void, not " ++ @typeName(Returns));
 
     if (info.param_types.len == 0) {
         return struct {
@@ -378,12 +462,20 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context) fn () v
 
 // Null stands for an entry point returning void, which checkOutcome reads as
 // one that cannot state an outcome.
-fn outcomeOf(comptime func: anytype, args: anytype) ?Transition {
-    if (comptime @typeInfo(@TypeOf(func)).@"fn".return_type == void) {
+fn outcomeOf(comptime func: anytype, args: anytype) ?Outcome {
+    const Returns = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
+    if (comptime Returns == void) {
         @call(.auto, func, args);
         return null;
     }
-    return @call(.auto, func, args);
+    if (comptime isTransition(Returns)) return @call(.auto, func, args).outcome;
+    if (comptime @typeInfo(Returns) == .error_union) {
+        const T = Transition(@typeInfo(Returns).error_union.payload);
+        const value = @call(.auto, func, args) catch |err|
+            return T.reject(@errorName(err)).outcome;
+        return T.reply(value).outcome;
+    }
+    return Transition(Returns).reply(@call(.auto, func, args)).outcome;
 }
 
 fn trap(message: []const u8) noreturn {

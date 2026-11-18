@@ -1,6 +1,4 @@
 const cdk = @import("cdk");
-const candid = cdk.candid;
-const tr = cdk.transition;
 
 pub const cdk_codec = cdk.CandidCodec;
 
@@ -14,20 +12,18 @@ const Greeting = struct {
     greeting: []const u8,
 };
 
-fn greetReplied(greeting: Greeting) tr.Transition {
-    const reply = candid.encode(cdk.allocator, .{greeting}) catch
-        @panic("failed to encode reply");
-    return tr.replyRaw(reply);
+fn greetReplied(greeting: Greeting) cdk.Transition(Greeting) {
+    return .reply(greeting);
 }
 
-fn call_greet() tr.Transition {
+fn call_greet() cdk.Transition(Greeting) {
     const callee = callee_principal orelse
-        return tr.reject("callee principal not set, pass it as init arg");
-    return tr.commit(.{ .onReply = greetReplied }, .{
+        return .reject("callee principal not set, pass it as init arg");
+    return .commit(.{ .onReply = greetReplied }, .{
         .callee = callee,
         .method = "greet",
         .arg = @as([]const u8, "world"),
-    }) catch tr.reject("call_perform failed");
+    });
 }
 
 comptime {

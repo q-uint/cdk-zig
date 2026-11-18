@@ -3,20 +3,12 @@ const cdk = @import("cdk");
 
 // Raw stable memory API: size, grow, write, read.
 
-fn getSize() void {
-    const pages = cdk.stableSize();
-    cdk.replyRaw(std.mem.asBytes(&pages));
+fn getSize() u64 {
+    return cdk.stableSize();
 }
 
-fn grow() void {
-    const arg = cdk.argData();
-    if (arg.len < 8) {
-        cdk.reject("expected 8 bytes (u64 page count)");
-        return;
-    }
-    const n = std.mem.readInt(u64, arg[0..8], .little);
-    const old = cdk.stableGrow(n);
-    cdk.replyRaw(std.mem.asBytes(&old));
+fn grow(pages: u64) u64 {
+    return cdk.stableGrow(pages);
 }
 
 fn write() void {
@@ -31,59 +23,33 @@ fn write() void {
     cdk.replyRaw("");
 }
 
-fn read() void {
+fn read() ![]const u8 {
     const arg = cdk.argData();
-    if (arg.len < 16) {
-        cdk.reject("expected offset (u64) + length (u64)");
-        return;
-    }
+    if (arg.len < 16) return error.ExpectedOffsetAndLength;
     const offset = std.mem.readInt(u64, arg[0..8], .little);
     const len = std.mem.readInt(u64, arg[8..16], .little);
-    const buf = cdk.allocator.alloc(u8, @intCast(len)) catch {
-        cdk.reject("alloc failed");
-        return;
-    };
+    const buf = try cdk.allocator.alloc(u8, @intCast(len));
     cdk.stableRead(offset, buf);
-    cdk.replyRaw(buf);
+    return buf;
 }
 
 // stable.Writer / stable.Reader streaming API.
 
-fn streamWrite() void {
-    const arg = cdk.argData();
+// Replies with the final offset, so the test knows how much was written.
+fn streamWrite(payload: []const u8) !u64 {
     var w = cdk.stable.Writer.init(0);
-    // Write the payload in two halves to exercise multiple writeSlice calls.
-    const mid = arg.len / 2;
-    _ = w.writeSlice(arg[0..mid]) catch {
-        cdk.reject("write failed");
-        return;
-    };
-    _ = w.writeSlice(arg[mid..]) catch {
-        cdk.reject("write failed");
-        return;
-    };
-    // Reply with the final offset so the test knows how many bytes were written.
-    const off = w.currentOffset();
-    cdk.replyRaw(std.mem.asBytes(&off));
+    // Two halves, to exercise more than one writeSlice.
+    const mid = payload.len / 2;
+    _ = try w.writeSlice(payload[0..mid]);
+    _ = try w.writeSlice(payload[mid..]);
+    return w.currentOffset();
 }
 
-fn streamRead() void {
-    const arg = cdk.argData();
-    if (arg.len < 8) {
-        cdk.reject("expected length (u64)");
-        return;
-    }
-    const len = std.mem.readInt(u64, arg[0..8], .little);
+fn streamRead(len: u64) ![]const u8 {
     var r = cdk.stable.Reader.init(0);
-    const buf = cdk.allocator.alloc(u8, @intCast(len)) catch {
-        cdk.reject("alloc failed");
-        return;
-    };
-    const n = r.readSlice(buf) catch {
-        cdk.reject("read failed");
-        return;
-    };
-    cdk.replyRaw(buf[0..n]);
+    const buf = try cdk.allocator.alloc(u8, @intCast(len));
+    const n = try r.readSlice(buf);
+    return buf[0..n];
 }
 
 // Pre/post upgrade hooks to test stable memory persistence.
@@ -110,8 +76,8 @@ fn increment() void {
     cdk.replyRaw("");
 }
 
-fn getCounter() void {
-    cdk.replyRaw(std.mem.asBytes(&counter));
+fn getCounter() u32 {
+    return counter;
 }
 
 comptime {

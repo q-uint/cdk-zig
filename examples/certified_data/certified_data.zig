@@ -34,22 +34,16 @@ fn set() void {
 // Query that returns the stored value along with the data certificate.
 // Reply format: [32 bytes root_hash] [certificate bytes]
 // The certificate is only available during query calls.
-fn getWithProof() void {
-    if (cdk.dataCertificate()) |cert| {
-        const reply = cdk.allocator.alloc(u8, 32 + cert.len) catch {
-            cdk.reject("alloc failed");
-            return;
-        };
-        @memcpy(reply[0..32], &root_hash);
-        @memcpy(reply[32..], cert);
-        cdk.replyRaw(reply);
-    } else {
-        cdk.reject("no certificate available (not a query call?)");
-    }
+fn getWithProof() ![]const u8 {
+    const cert = cdk.dataCertificate() orelse return error.NoCertificate;
+    const reply = try cdk.allocator.alloc(u8, 32 + cert.len);
+    @memcpy(reply[0..32], &root_hash);
+    @memcpy(reply[32..], cert);
+    return reply;
 }
 
-fn get() void {
-    cdk.replyRaw(stored_value);
+fn get() []const u8 {
+    return stored_value;
 }
 
 comptime {

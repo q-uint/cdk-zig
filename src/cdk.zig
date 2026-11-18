@@ -5,6 +5,7 @@ pub const ic0 = @import("ic0.zig");
 
 pub const ic0_spec = @import("ic0_spec.zig");
 pub const transition = @import("transition.zig");
+pub const Transition = transition.Transition;
 pub const stable = @import("stable/stable.zig");
 pub const candid = @import("candid/candid.zig");
 const exp = @import("export.zig");
@@ -131,11 +132,11 @@ pub fn acceptMessage() void {
 // Message output, for entry points with no transition to state. Entry points
 // that make a call use the transition module's versions, which return one.
 pub fn replyRaw(msg: []const u8) void {
-    _ = transition.replyRaw(msg);
+    _ = transition.Transition(void).replyRaw(msg);
 }
 
 pub fn reject(msg: []const u8) void {
-    _ = transition.reject(msg);
+    _ = transition.Transition(void).reject(msg);
 }
 
 // Cycles (message-level)

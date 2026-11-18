@@ -88,10 +88,8 @@ fn persist(acc: u32) u32 {
     return acc;
 }
 
-fn getCounter() void {
-    var buf: [4]u8 = undefined;
-    @memcpy(&buf, &@import("std").mem.toBytes(counter));
-    cdk.replyRaw(&buf);
+fn getCounter() u32 {
+    return counter;
 }
 
 comptime {

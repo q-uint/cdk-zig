@@ -1,6 +1,5 @@
 const std = @import("std");
 const cdk = @import("cdk");
-const tr = cdk.transition;
 
 // Used by probe.zig, which reads it to spot leaks. cdk_allocator has to be
 // declared in the root source file, so it lives here rather than there.
@@ -18,21 +17,21 @@ fn init(arg: []const u8) void {
         @panic("invalid principal");
 }
 
-fn greetReplied(data: []const u8) tr.Transition {
-    return tr.replyRaw(data);
+fn greetReplied(data: []const u8) cdk.Transition([]const u8) {
+    return .reply(data);
 }
 
-fn call_greet() tr.Transition {
+fn call_greet() cdk.Transition([]const u8) {
     const callee = callee_principal orelse
-        return tr.reject("callee principal not set, pass it as init arg");
-    return tr.commit(
+        return .reject("callee principal not set, pass it as init arg");
+    return .commit(
         .{ .onReply = greetReplied },
         .{ .callee = callee, .method = "greet" },
-    ) catch tr.reject("call_perform failed");
+    );
 }
 
-fn greet() void {
-    cdk.replyRaw("hello from caller");
+fn greet() []const u8 {
+    return "hello from caller";
 }
 
 // Passed to commit as .onFinish, which the CDK runs on whichever of reply,
@@ -51,44 +50,46 @@ const Greeting = struct {
 //
 // The greeting reaches the second continuation as pending state, held per
 // call rather than in a global, so two callers cannot overwrite each other.
-fn chainedGreetReplied(data: []const u8) tr.Transition {
+fn chainedGreetReplied(data: []const u8) cdk.Transition([]const u8) {
     const callee = callee_principal orelse
-        return tr.reject("callee principal not set, pass it as init arg");
+        return .reject("callee principal not set, pass it as init arg");
 
     // Copied, because the reply buffer is freed when this continuation
     // returns.
-    const kept = cdk.allocator.dupe(u8, data) catch return tr.reject("out of memory");
+    const kept = cdk.allocator.dupe(u8, data) catch return .reject("out of memory");
 
-    return tr.commit(.{
+    // If the call is never sent, the CDK finishes the pending state itself,
+    // so the copy above is not leaked.
+    return .commit(.{
         .onReply = chainedFarewellReplied,
         .onFinish = Greeting.deinit,
     }, .{
         .callee = callee,
         .method = "farewell",
         .pending = Greeting{ .text = kept },
-    }) catch tr.reject("call_perform failed");
+    });
 }
 
-fn chainedFarewellReplied(greeting: Greeting, data: []const u8) tr.Transition {
+fn chainedFarewellReplied(greeting: Greeting, data: []const u8) cdk.Transition([]const u8) {
     const first = greeting.text;
     const separator = " and ";
     const combined = cdk.allocator.alloc(u8, first.len + separator.len + data.len) catch
-        return tr.reject("out of memory");
+        return .reject("out of memory");
     defer cdk.allocator.free(combined);
 
     @memcpy(combined[0..first.len], first);
     @memcpy(combined[first.len..][0..separator.len], separator);
     @memcpy(combined[first.len + separator.len ..][0..data.len], data);
-    return tr.replyRaw(combined);
+    return .reply(combined);
 }
 
-fn call_chained() tr.Transition {
+fn call_chained() cdk.Transition([]const u8) {
     const callee = callee_principal orelse
-        return tr.reject("callee principal not set, pass it as init arg");
-    return tr.commit(
+        return .reject("callee principal not set, pass it as init arg");
+    return .commit(
         .{ .onReply = chainedGreetReplied },
         .{ .callee = callee, .method = "greet" },
-    ) catch tr.reject("call_perform failed");
+    );
 }
 
 comptime {
