@@ -39,9 +39,9 @@ test "callee greet" {
             defer allocator.free(g.greeting);
             try std.testing.expectEqualStrings("hello, world!", g.greeting);
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
-            std.debug.print("rejected: {s}\n", .{msg});
+        .reject => |rej| {
+            defer rej.deinit(allocator);
+            std.debug.print("rejected: {s}\n", .{rej.message});
             return error.Rejected;
         },
     }
@@ -72,9 +72,9 @@ test "caller calls callee" {
             defer allocator.free(g.greeting);
             try std.testing.expectEqualStrings("hello, world!", g.greeting);
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
-            std.debug.print("rejected: {s}\n", .{msg});
+        .reject => |rej| {
+            defer rej.deinit(allocator);
+            std.debug.print("rejected: {s}\n", .{rej.message});
             return error.Rejected;
         },
     }

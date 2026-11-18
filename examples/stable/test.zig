@@ -30,9 +30,9 @@ fn expectReply(
     };
     switch (result) {
         .reply => |data| return data,
-        .reject => |msg| {
-            defer allocator.free(msg);
-            std.debug.print("rejected: {s}\n", .{msg});
+        .reject => |rej| {
+            defer rej.deinit(allocator);
+            std.debug.print("rejected: {s}\n", .{rej.message});
             return error.Rejected;
         },
     }

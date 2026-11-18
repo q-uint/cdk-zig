@@ -37,8 +37,182 @@ pub const InstallMode = enum {
 
 pub const WasmResult = union(enum) {
     reply: []const u8,
-    reject: []const u8,
+    reject: Reject,
 };
+
+/// The interface spec's reject codes. A trap is `CanisterError`, an explicit
+/// reject `CanisterReject`.
+pub const RejectCode = enum(u8) {
+    SysFatal = 1,
+    SysTransient = 2,
+    DestinationInvalid = 3,
+    CanisterReject = 4,
+    CanisterError = 5,
+    SysUnknown = 6,
+};
+
+pub const Reject = struct {
+    code: RejectCode,
+    /// The replica's name for what happened, `CanisterCalledTrap` say. Empty
+    /// when the server gave none.
+    error_code: []const u8,
+    message: []const u8,
+
+    pub fn deinit(self: Reject, allocator: Allocator) void {
+        allocator.free(self.error_code);
+        allocator.free(self.message);
+    }
+};
+
+/// A decoded reply and the memory it lives in. `deinit` frees both.
+pub fn Owned(comptime T: type) type {
+    return struct {
+        value: T,
+        arena: *std.heap.ArenaAllocator,
+
+        pub fn deinit(self: @This()) void {
+            const child = self.arena.child_allocator;
+            self.arena.deinit();
+            child.destroy(self.arena);
+        }
+    };
+}
+
+pub const CallKind = enum { query, update };
+
+/// One canister and the codec it speaks. Arguments are encoded and replies
+/// decoded with `Codec`, the same `encode`/`decode` pair a canister declares
+/// as `cdk_codec`.
+pub fn Canister(comptime Codec: type) type {
+    return struct {
+        pic: *PocketIc,
+        id: principal.Principal,
+        sender: principal.Principal = principal.anonymous,
+
+        const Self = @This();
+
+        /// The same canister, called as `sender`.
+        pub fn as(self: Self, sender: principal.Principal) Self {
+            var copy = self;
+            copy.sender = sender;
+            return copy;
+        }
+
+        /// The same canister, spoken to in `Other`, for a method it exports
+        /// with `cdk.queryWith` or `cdk.updateWith`.
+        pub fn with(self: Self, comptime Other: type) Canister(Other) {
+            return .{ .pic = self.pic, .id = self.id, .sender = self.sender };
+        }
+
+        /// Pass `{}` as `arg` for a method that takes none.
+        pub fn query(self: Self, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
+            return self.expectReply(.query, T, method, arg);
+        }
+
+        pub fn update(self: Self, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
+            return self.expectReply(.update, T, method, arg);
+        }
+
+        /// A query exported with `cdk.queryWith(Other, ...)`.
+        pub fn queryWith(self: Self, comptime Other: type, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
+            return self.with(Other).query(T, method, arg);
+        }
+
+        /// An update exported with `cdk.updateWith(Other, ...)`.
+        pub fn updateWith(self: Self, comptime Other: type, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
+            return self.with(Other).update(T, method, arg);
+        }
+
+        /// The rejection of a call expected to be rejected. `code` tells a
+        /// trap (`CanisterError`) from an explicit reject (`CanisterReject`).
+        pub fn expectReject(self: Self, kind: CallKind, method: []const u8, arg: anytype) !Owned(Reject) {
+            return self.rejectOf(try self.send(kind, method, arg));
+        }
+
+        /// Submits an update without waiting for it, so a test can put
+        /// several in flight before awaiting any.
+        pub fn submitUpdate(self: Self, method: []const u8, arg: anytype) !PocketIc.Pending {
+            var scratch = std.heap.ArenaAllocator.init(self.pic.allocator);
+            defer scratch.deinit();
+            return self.pic.submitUpdate(self.id, self.sender, method, try self.encode(scratch.allocator(), arg));
+        }
+
+        pub fn awaitUpdate(self: Self, comptime T: type, pending: PocketIc.Pending) !Owned(T) {
+            return self.replyOf(T, "submitted update", try self.pic.awaitUpdate(pending));
+        }
+
+        pub fn awaitReject(self: Self, pending: PocketIc.Pending) !Owned(Reject) {
+            return self.rejectOf(try self.pic.awaitUpdate(pending));
+        }
+
+        fn expectReply(self: Self, kind: CallKind, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
+            return self.replyOf(T, method, try self.send(kind, method, arg));
+        }
+
+        fn send(self: Self, kind: CallKind, method: []const u8, arg: anytype) !WasmResult {
+            var scratch = std.heap.ArenaAllocator.init(self.pic.allocator);
+            defer scratch.deinit();
+            const payload = try self.encode(scratch.allocator(), arg);
+            return switch (kind) {
+                .query => self.pic.queryCall(self.id, self.sender, method, payload),
+                .update => self.pic.updateCall(self.id, self.sender, method, payload),
+            };
+        }
+
+        fn encode(_: Self, a: std.mem.Allocator, arg: anytype) ![]const u8 {
+            if (@TypeOf(arg) == void) return "";
+            return Codec.encode(a, @TypeOf(arg), arg);
+        }
+
+        // Moves the reply into a fresh arena before decoding, so a value
+        // that points into it, as a Raw []const u8 or leaky JSON does, stays
+        // valid. Takes ownership of the result either way.
+        fn replyOf(self: Self, comptime T: type, what: []const u8, result: WasmResult) !Owned(T) {
+            const gpa = self.pic.allocator;
+            switch (result) {
+                .reply => |data| {
+                    defer gpa.free(data);
+                    const owned = try newArena(gpa);
+                    errdefer owned.deinit();
+                    const a = owned.arena.allocator();
+                    return .{ .value = try Codec.decode(a, T, try a.dupe(u8, data)), .arena = owned.arena };
+                },
+                .reject => |rej| {
+                    defer rej.deinit(gpa);
+                    std.log.debug("{s} was rejected ({t}): {s}", .{ what, rej.code, rej.message });
+                    return error.Rejected;
+                },
+            }
+        }
+
+        fn rejectOf(self: Self, result: WasmResult) !Owned(Reject) {
+            const gpa = self.pic.allocator;
+            switch (result) {
+                .reply => |data| {
+                    gpa.free(data);
+                    return error.ExpectedReject;
+                },
+                .reject => |rej| {
+                    defer rej.deinit(gpa);
+                    const owned = try newArena(gpa);
+                    errdefer owned.deinit();
+                    const a = owned.arena.allocator();
+                    return .{ .value = .{
+                        .code = rej.code,
+                        .error_code = try a.dupe(u8, rej.error_code),
+                        .message = try a.dupe(u8, rej.message),
+                    }, .arena = owned.arena };
+                },
+            }
+        }
+    };
+}
+
+fn newArena(gpa: Allocator) !Owned(void) {
+    const arena = try gpa.create(std.heap.ArenaAllocator);
+    arena.* = .init(gpa);
+    return .{ .value = {}, .arena = arena };
+}
 
 pub const PocketIcConfig = struct {
     server_url: ?[]const u8 = null,
@@ -227,7 +401,7 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(submit_url);
 
-        return self.submitAndAwait(submit_url, call_json);
+        return self.awaitUpdate(try self.submit(submit_url, call_json));
     }
 
     pub fn queryCall(
@@ -258,6 +432,12 @@ pub const PocketIc = struct {
         defer self.allocator.free(resp.body);
 
         return parseCanisterResult(self.allocator, resp.body);
+    }
+
+    /// A handle that speaks `Codec` to one canister, as the canister's own
+    /// `cdk_codec` does.
+    pub fn canister(self: *PocketIc, comptime Codec: type, id: principal.Principal) Canister(Codec) {
+        return .{ .pic = self, .id = id };
     }
 
     pub fn tick(self: *PocketIc) !void {
@@ -397,6 +577,177 @@ pub const PocketIc = struct {
         self.allocator.free(resp.body);
     }
 
+    /// Who makes a management call. Only a controller may, and a canister
+    /// created with `createCanister` is controlled by anonymous.
+    pub const As = struct {
+        sender: principal.Principal = principal.anonymous,
+    };
+
+    pub fn stopCanister(self: *PocketIc, canister_id: principal.Principal, as: As) !void {
+        try self.onCanister("stop_canister", canister_id, as);
+    }
+
+    pub fn startCanister(self: *PocketIc, canister_id: principal.Principal, as: As) !void {
+        try self.onCanister("start_canister", canister_id, as);
+    }
+
+    /// The canister must be stopped first.
+    pub fn deleteCanister(self: *PocketIc, canister_id: principal.Principal, as: As) !void {
+        try self.onCanister("delete_canister", canister_id, as);
+    }
+
+    /// Removes the code and state. Outstanding calls are rejected, and their
+    /// callbacks never run.
+    pub fn uninstallCode(self: *PocketIc, canister_id: principal.Principal, as: As) !void {
+        try self.onCanister("uninstall_code", canister_id, as);
+    }
+
+    pub const CanisterStatus = struct {
+        status: enum { running, stopping, stopped },
+        memory_size: u128,
+        cycles: u128,
+        /// The installed module's SHA-256, null when none is installed.
+        module_hash: ?[32]u8,
+    };
+
+    pub fn canisterStatus(self: *PocketIc, canister_id: principal.Principal, as: As) !CanisterStatus {
+        const payload = try self.canisterIdArg(canister_id);
+        defer self.allocator.free(payload);
+        const reply = try self.managementCallWithEffective(as.sender, "canister_status", payload, .{ .canister_id = canister_id });
+        defer self.allocator.free(reply);
+
+        // A subset of the record. The decoder skips the fields left out.
+        const Status = struct {
+            status: union(enum) { running, stopping, stopped },
+            memory_size: u128,
+            cycles: u128,
+            module_hash: ?candid.Blob,
+        };
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const status = candid.decode(Status, arena.allocator(), reply) catch
+            return error.CandidDecodingFailed;
+
+        var hash: ?[32]u8 = null;
+        if (status.module_hash) |blob| {
+            if (blob.data.len != 32) return error.CandidDecodingFailed;
+            hash = blob.data[0..32].*;
+        }
+        return .{
+            .status = switch (status.status) {
+                .running => .running,
+                .stopping => .stopping,
+                .stopped => .stopped,
+            },
+            .memory_size = status.memory_size,
+            .cycles = status.cycles,
+            .module_hash = hash,
+        };
+    }
+
+    /// Replaces the canister's controllers.
+    pub fn setControllers(
+        self: *PocketIc,
+        canister_id: principal.Principal,
+        controllers: []const principal.Principal,
+        as: As,
+    ) !void {
+        // Settings left out stay as they are.
+        const Settings = struct { controllers: ?[]const candid.Principal };
+        const Args = struct { canister_id: candid.Principal, settings: Settings };
+        const payload = candid.encode(self.allocator, .{Args{
+            .canister_id = canister_id,
+            .settings = .{ .controllers = controllers },
+        }}) catch return error.CandidEncodingFailed;
+        defer self.allocator.free(payload);
+
+        const reply = try self.managementCallWithEffective(as.sender, "update_settings", payload, .{ .canister_id = canister_id });
+        self.allocator.free(reply);
+    }
+
+    pub const LogRecord = struct {
+        idx: u64,
+        timestamp_nanos: u64,
+        content: []const u8,
+    };
+
+    /// What the canister printed with `cdk.print`, and its trap messages,
+    /// oldest first.
+    pub fn canisterLogs(self: *PocketIc, canister_id: principal.Principal, as: As) !Owned([]const LogRecord) {
+        const Logs = struct {
+            canister_log_records: []const struct {
+                idx: u64,
+                timestamp_nanos: u64,
+                content: candid.Blob,
+            },
+        };
+
+        const payload = try self.canisterIdArg(canister_id);
+        defer self.allocator.free(payload);
+        const reply = try self.managementQuery("fetch_canister_logs", payload, canister_id, as);
+        defer self.allocator.free(reply);
+
+        const owned = try newArena(self.allocator);
+        errdefer owned.deinit();
+        const a = owned.arena.allocator();
+        const logs = candid.decode(Logs, a, reply) catch return error.CandidDecodingFailed;
+
+        const records = try a.alloc(LogRecord, logs.canister_log_records.len);
+        for (logs.canister_log_records, records) |raw, *record| {
+            record.* = .{ .idx = raw.idx, .timestamp_nanos = raw.timestamp_nanos, .content = raw.content.data };
+        }
+        return .{ .value = records, .arena = owned.arena };
+    }
+
+    fn onCanister(self: *PocketIc, method: []const u8, canister_id: principal.Principal, as: As) !void {
+        const payload = try self.canisterIdArg(canister_id);
+        defer self.allocator.free(payload);
+        const reply = try self.managementCallWithEffective(as.sender, method, payload, .{ .canister_id = canister_id });
+        self.allocator.free(reply);
+    }
+
+    // `record { canister_id }`, the argument most management methods take.
+    fn canisterIdArg(self: *PocketIc, canister_id: principal.Principal) ![]const u8 {
+        const Args = struct { canister_id: candid.Principal };
+        return candid.encode(self.allocator, .{Args{ .canister_id = canister_id }}) catch
+            error.CandidEncodingFailed;
+    }
+
+    // A query to the management canister, routed by the canister it is
+    // about rather than by its own id.
+    fn managementQuery(
+        self: *PocketIc,
+        method: []const u8,
+        payload: []const u8,
+        canister_id: principal.Principal,
+        as: As,
+    ) ![]const u8 {
+        const call_json = try buildCanisterCallJson(
+            self.allocator,
+            as.sender,
+            principal.management_canister,
+            method,
+            payload,
+            .{ .canister_id = canister_id },
+        );
+        defer self.allocator.free(call_json);
+
+        const url = try std.fmt.allocPrint(self.allocator, "{s}/instances/{d}/read/query", .{ self.url, self.instance_id });
+        defer self.allocator.free(url);
+
+        const resp = try self.requestAndPoll(.POST, url, call_json);
+        defer self.allocator.free(resp.body);
+
+        switch (try parseCanisterResult(self.allocator, resp.body)) {
+            .reply => |data| return data,
+            .reject => |rej| {
+                defer rej.deinit(self.allocator);
+                std.log.debug("management canister rejected {s}: {s}", .{ method, rej.message });
+                return error.ManagementCanisterRejected;
+            },
+        }
+    }
+
     fn managementCallWithEffective(
         self: *PocketIc,
         sender: principal.Principal,
@@ -421,32 +772,62 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(submit_url);
 
-        const result = try self.submitAndAwait(submit_url, call_json);
+        const result = try self.awaitUpdate(try self.submit(submit_url, call_json));
         switch (result) {
             .reply => |data| return data,
-            .reject => |msg| {
-                std.log.err("management canister rejected: {s}", .{msg});
-                self.allocator.free(msg);
+            .reject => |rej| {
+                defer rej.deinit(self.allocator);
+                std.log.debug("management canister rejected {s}: {s}", .{ method, rej.message });
                 return error.ManagementCanisterRejected;
             },
         }
     }
 
-    fn submitAndAwait(self: *PocketIc, submit_url: []const u8, call_json: []const u8) !WasmResult {
-        const submit_resp = try self.requestAndPoll(.POST, submit_url, call_json);
-        defer self.allocator.free(submit_resp.body);
+    /// An update call that has been submitted but not yet awaited. Several
+    /// can be in flight at once, which is how a test interleaves messages.
+    /// Pass it to `awaitUpdate`, which consumes it.
+    pub const Pending = union(enum) {
+        /// The server's message id, as the JSON it expects back.
+        id: []const u8,
+        /// Rejected before it ran, by inspect_message say.
+        done: WasmResult,
+    };
 
-        // submit_ingress_message returns {"Ok": <message_id>} or {"Err": ...}
-        const submit_parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, submit_resp.body, .{
-            .allocate = .alloc_always,
-        });
-        defer submit_parsed.deinit();
+    /// Submits an update call without waiting for it to run.
+    pub fn submitUpdate(
+        self: *PocketIc,
+        canister_id: principal.Principal,
+        sender: principal.Principal,
+        method: []const u8,
+        payload: []const u8,
+    ) !Pending {
+        const call_json = try buildCanisterCallJson(
+            self.allocator,
+            sender,
+            canister_id,
+            method,
+            payload,
+            .{ .canister_id = canister_id },
+        );
+        defer self.allocator.free(call_json);
 
-        const message_id_val = submit_parsed.value.object.get("Ok") orelse {
-            return .{ .reject = try self.allocator.dupe(u8, "submit_ingress_message failed") };
+        const submit_url = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/instances/{d}/update/submit_ingress_message",
+            .{ self.url, self.instance_id },
+        );
+        defer self.allocator.free(submit_url);
+
+        return self.submit(submit_url, call_json);
+    }
+
+    /// Runs rounds until the submitted call completes, and returns its result.
+    pub fn awaitUpdate(self: *PocketIc, pending: Pending) !WasmResult {
+        const id = switch (pending) {
+            .done => |result| return result,
+            .id => |id| id,
         };
-        const message_id_json = try std.json.Stringify.valueAlloc(self.allocator, message_id_val, .{});
-        defer self.allocator.free(message_id_json);
+        defer self.allocator.free(id);
 
         const await_url = try std.fmt.allocPrint(
             self.allocator,
@@ -455,10 +836,29 @@ pub const PocketIc = struct {
         );
         defer self.allocator.free(await_url);
 
-        const await_resp = try self.requestAndPoll(.POST, await_url, message_id_json);
+        const await_resp = try self.requestAndPoll(.POST, await_url, id);
         defer self.allocator.free(await_resp.body);
 
         return parseCanisterResult(self.allocator, await_resp.body);
+    }
+
+    fn submit(self: *PocketIc, submit_url: []const u8, call_json: []const u8) !Pending {
+        const submit_resp = try self.requestAndPoll(.POST, submit_url, call_json);
+        defer self.allocator.free(submit_resp.body);
+
+        // submit_ingress_message returns {"Ok": <message_id>} or {"Err": ...}
+        const submit_parsed = std.json.parseFromSlice(std.json.Value, self.allocator, submit_resp.body, .{
+            .allocate = .alloc_always,
+        }) catch return error.InvalidCanisterResult;
+        defer submit_parsed.deinit();
+
+        if (submit_parsed.value.object.get("Ok")) |message_id| {
+            return .{ .id = try std.json.Stringify.valueAlloc(self.allocator, message_id, .{}) };
+        }
+        if (submit_parsed.value.object.get("Err")) |err_val| {
+            return .{ .done = .{ .reject = try parseReject(self.allocator, err_val) } };
+        }
+        return error.InvalidCanisterResult;
     }
 
     pub const Certificate = struct {
@@ -1028,22 +1428,38 @@ fn parseCanisterResult(allocator: Allocator, json_body: []const u8) !WasmResult 
             const decoded = try base64Decode(allocator, reply_b64);
             return .{ .reply = decoded };
         }
+        // The older form carries no codes, only an explicit reject's message.
         if (ok_val.object.get("Reject")) |reject_val| {
-            const msg = try allocator.dupe(u8, reject_val.string);
-            return .{ .reject = msg };
+            return .{ .reject = .{
+                .code = .CanisterReject,
+                .error_code = "",
+                .message = try allocator.dupe(u8, reject_val.string),
+            } };
         }
         return error.InvalidCanisterResult;
     }
 
     if (parsed.value.object.get("Err")) |err_val| {
-        const rejection = std.json.parseFromValue(RejectResponse, allocator, err_val, .{}) catch
-            return error.InvalidCanisterResult;
-        defer rejection.deinit();
-
-        return .{ .reject = try allocator.dupe(u8, rejection.value.reject_message) };
+        return .{ .reject = try parseReject(allocator, err_val) };
     }
 
     return error.InvalidCanisterResult;
+}
+
+fn parseReject(allocator: Allocator, value: std.json.Value) !Reject {
+    const rejection = std.json.parseFromValue(RejectResponse, allocator, value, .{}) catch
+        return error.InvalidCanisterResult;
+    defer rejection.deinit();
+
+    const code = std.meta.stringToEnum(RejectCode, rejection.value.reject_code) orelse
+        return error.InvalidCanisterResult;
+    const error_code = try allocator.dupe(u8, rejection.value.error_code);
+    errdefer allocator.free(error_code);
+    return .{
+        .code = code,
+        .error_code = error_code,
+        .message = try allocator.dupe(u8, rejection.value.reject_message),
+    };
 }
 
 fn base64Encode(allocator: Allocator, data: []const u8) ![]const u8 {
@@ -1211,8 +1627,8 @@ test "parseCanisterResult reply" {
             defer testing.allocator.free(data);
             try testing.expectEqualStrings("hello", data);
         },
-        .reject => |msg| {
-            defer testing.allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(testing.allocator);
             return error.UnexpectedReject;
         },
     }
@@ -1226,9 +1642,10 @@ test "parseCanisterResult reject" {
             defer testing.allocator.free(data);
             return error.UnexpectedReply;
         },
-        .reject => |msg| {
-            defer testing.allocator.free(msg);
-            try testing.expectEqualStrings("canister trapped", msg);
+        .reject => |rej| {
+            defer rej.deinit(testing.allocator);
+            try testing.expectEqual(RejectCode.CanisterReject, rej.code);
+            try testing.expectEqualStrings("canister trapped", rej.message);
         },
     }
 }
@@ -1253,11 +1670,13 @@ test "parseCanisterResult error" {
             defer testing.allocator.free(data);
             return error.UnexpectedReply;
         },
-        .reject => |msg| {
-            defer testing.allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(testing.allocator);
+            try testing.expectEqual(RejectCode.CanisterReject, rej.code);
+            try testing.expectEqualStrings("CanisterRejectedMessage", rej.error_code);
             try testing.expectEqualStrings(
                 "No route to canister tz2ag-zx777-77776-aaabq-cai",
-                msg,
+                rej.message,
             );
         },
     }
@@ -1399,9 +1818,9 @@ test "server: install code and query" {
             defer testing.allocator.free(data);
             try testing.expectEqualStrings("hello", data);
         },
-        .reject => |msg| {
-            defer testing.allocator.free(msg);
-            std.debug.print("rejected: {s}\n", .{msg});
+        .reject => |rej| {
+            defer rej.deinit(testing.allocator);
+            std.debug.print("rejected: {s}\n", .{rej.message});
             return error.Rejected;
         },
     }
@@ -1431,6 +1850,74 @@ test "server: tick" {
     defer ts.deinit();
 
     try ts.pic.tick();
+}
+
+test "server: canister lifecycle" {
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
+
+    const cid = try ts.pic.createCanister();
+    try testing.expectEqual(@as(?[32]u8, null), (try ts.pic.canisterStatus(cid, .{})).module_hash);
+
+    try ts.pic.installCode(cid, &test_canister_wasm, "", .install);
+    const running = try ts.pic.canisterStatus(cid, .{});
+    try testing.expectEqual(.running, running.status);
+    try testing.expect(running.module_hash != null);
+
+    try ts.pic.stopCanister(cid, .{});
+    try testing.expectEqual(.stopped, (try ts.pic.canisterStatus(cid, .{})).status);
+
+    // A stopped canister rejects calls.
+    const stopped = try ts.pic.queryCall(cid, principal.anonymous, "greet", "");
+    switch (stopped) {
+        .reply => |data| {
+            testing.allocator.free(data);
+            return error.ExpectedReject;
+        },
+        .reject => |rej| rej.deinit(testing.allocator),
+    }
+
+    try ts.pic.startCanister(cid, .{});
+    try testing.expectEqual(.running, (try ts.pic.canisterStatus(cid, .{})).status);
+
+    try ts.pic.uninstallCode(cid, .{});
+    try testing.expectEqual(@as(?[32]u8, null), (try ts.pic.canisterStatus(cid, .{})).module_hash);
+
+    try ts.pic.stopCanister(cid, .{});
+    try ts.pic.deleteCanister(cid, .{});
+}
+
+test "server: set controllers" {
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
+
+    const cid = try ts.pic.createCanister();
+    // Hand control to someone else, and anonymous loses the right to
+    // manage it.
+    const owner = principal.Principal.from(&.{ 1, 2, 3 });
+    try ts.pic.setControllers(cid, &.{owner}, .{});
+    try testing.expectError(error.ManagementCanisterRejected, ts.pic.canisterStatus(cid, .{}));
+    // The new controller can.
+    _ = try ts.pic.canisterStatus(cid, .{ .sender = owner });
+}
+
+test "server: submitted updates run interleaved" {
+    var ts = try TestServer.init(.{});
+    defer ts.deinit();
+
+    const cid = try ts.pic.createCanister();
+    try ts.pic.installCode(cid, &test_canister_wasm, "", .install);
+
+    // greet is exported as a query, so as an update it is rejected, which is
+    // enough to see two submissions in flight resolve independently.
+    const first = try ts.pic.submitUpdate(cid, principal.anonymous, "greet", "");
+    const second = try ts.pic.submitUpdate(cid, principal.anonymous, "greet", "");
+    for ([_]PocketIc.Pending{ second, first }) |pending| {
+        switch (try ts.pic.awaitUpdate(pending)) {
+            .reply => |data| testing.allocator.free(data),
+            .reject => |rej| rej.deinit(testing.allocator),
+        }
+    }
 }
 
 test "server: add and get cycles" {

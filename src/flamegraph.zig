@@ -99,8 +99,8 @@ pub fn fetch(
             defer allocator.free(data);
             try parseNames(allocator, data, &names);
         },
-        .reject => |msg| {
-            allocator.free(msg);
+        .reject => |rej| {
+            rej.deinit(allocator);
             return error.ProfilingNamesRejected;
         },
     }
@@ -137,8 +137,8 @@ pub fn fetch(
                 if (next_page < 0) break;
                 page = @intCast(next_page);
             },
-            .reject => |msg| {
-                allocator.free(msg);
+            .reject => |rej| {
+                rej.deinit(allocator);
                 return error.ProfilingDataRejected;
             },
         }

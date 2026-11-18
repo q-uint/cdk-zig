@@ -1,19 +1,8 @@
 const std = @import("std");
 const cdk = @import("cdk");
 
-/// JSON on the wire, by way of std.json. Anything with these two functions is
-/// a codec. Both allocate from `a`, which the CDK frees when the message ends.
-pub const Json = struct {
-    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8 {
-        return std.json.Stringify.valueAlloc(a, value, .{}) catch @panic("json: out of memory");
-    }
-
-    pub fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) T {
-        return std.json.parseFromSliceLeaky(T, a, bytes, .{}) catch @panic("json: invalid argument");
-    }
-};
-
-pub const cdk_codec = Json;
+// Shared with test.zig, which speaks the same format.
+pub const cdk_codec = @import("codec.zig");
 
 const Entry = struct {
     key: []const u8,

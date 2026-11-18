@@ -7,6 +7,8 @@ pub const ic0_spec = @import("ic0_spec.zig");
 pub const transition = @import("transition.zig");
 pub const Transition = transition.Transition;
 pub const TransitionWith = transition.TransitionWith;
+pub const Rejection = transition.Rejection;
+pub const Undecodable = transition.Undecodable;
 pub const stable = @import("stable/stable.zig");
 pub const candid = @import("candid/candid.zig");
 const exp = @import("export.zig");
@@ -32,14 +34,12 @@ pub const assert = @import("assert.zig").assert;
 pub const RawCodec = @import("codec.zig").Raw;
 
 pub const CandidCodec = struct {
-    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8 {
-        return candid.encode(a, .{value}) catch
-            @panic("candid encode failed");
+    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) ![]const u8 {
+        return candid.encode(a, .{value});
     }
 
-    pub fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) T {
-        return candid.decode(T, a, bytes) catch
-            @panic("candid decode failed");
+    pub fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) !T {
+        return candid.decode(T, a, bytes);
     }
 };
 

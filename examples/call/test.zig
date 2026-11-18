@@ -22,23 +22,21 @@ fn expectReply(result: pic.WasmResult, expected: []const u8) !void {
             defer allocator.free(data);
             try std.testing.expectEqualStrings(expected, data);
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
-            std.debug.print("rejected: {s}\n", .{msg});
+        .reject => |rej| {
+            defer rej.deinit(allocator);
+            std.debug.print("rejected: {s}\n", .{rej.message});
             return error.Rejected;
         },
     }
 }
 
-fn expectReject(result: pic.WasmResult) ![]const u8 {
+fn expectReject(result: pic.WasmResult) !pic.Reject {
     switch (result) {
         .reply => |data| {
             defer allocator.free(data);
             return error.ExpectedReject;
         },
-        .reject => |msg| {
-            return msg;
-        },
+        .reject => |rej| return rej,
     }
 }
 
@@ -138,8 +136,9 @@ test "query non-existent method returns reject" {
     try pocket.installCode(cid, callee_wasm, "", .install);
 
     const result = try pocket.queryCall(cid, cdk.principal.anonymous, "no_such_method", "");
-    const msg = try expectReject(result);
-    defer allocator.free(msg);
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    const msg = rej.message;
     try std.testing.expect(msg.len > 0);
 }
 
@@ -154,8 +153,9 @@ test "update non-existent method returns reject" {
     try pocket.installCode(cid, callee_wasm, "", .install);
 
     const result = try pocket.updateCall(cid, cdk.principal.anonymous, "no_such_method", "");
-    const msg = try expectReject(result);
-    defer allocator.free(msg);
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    const msg = rej.message;
     try std.testing.expect(msg.len > 0);
 }
 
@@ -171,8 +171,9 @@ test "caller without callee principal rejects call_greet" {
     try pocket.installCode(caller_id, caller_wasm, "", .install);
 
     const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_greet", "");
-    const msg = try expectReject(result);
-    defer allocator.free(msg);
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    const msg = rej.message;
     try std.testing.expect(msg.len > 0);
 }
 
@@ -198,8 +199,8 @@ fn greetingsFreed(pocket: *pic.PocketIc, caller_id: cdk.principal.Principal) !u3
             try std.testing.expectEqual(@as(usize, 4), data.len);
             return std.mem.readInt(u32, data[0..4], .little);
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(allocator);
             return error.Rejected;
         },
     }
@@ -213,8 +214,8 @@ fn outstandingBytes(pocket: *pic.PocketIc, caller_id: cdk.principal.Principal) !
             try std.testing.expectEqual(@as(usize, 8), data.len);
             return std.mem.readInt(u64, data[0..8], .little);
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(allocator);
             return error.Rejected;
         },
     }
@@ -248,8 +249,8 @@ test "pending state is released when the call rejects" {
         "call_chained_rejecting",
         "",
     );
-    const msg = try expectReject(result);
-    defer allocator.free(msg);
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), try greetingsFreed(&pocket, caller_id));
 }
@@ -266,9 +267,76 @@ test "pending state is released when the continuation traps" {
         "call_chained_trapping",
         "",
     );
-    const msg = try expectReject(result);
-    defer allocator.free(msg);
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
 
+    try std.testing.expectEqual(@as(u32, 1), try greetingsFreed(&pocket, caller_id));
+}
+
+test "chained calls in flight at once each keep their pending state" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+    const before = try outstandingBytes(&pocket, caller_id);
+
+    // Both are submitted before either runs, so their messages interleave
+    // and both greetings sit in pending slots at the same time.
+    const first = try pocket.submitUpdate(caller_id, cdk.principal.anonymous, "call_chained", "");
+    const second = try pocket.submitUpdate(caller_id, cdk.principal.anonymous, "call_chained", "");
+    try expectReply(try pocket.awaitUpdate(second), "hello from callee and goodbye from callee");
+    try expectReply(try pocket.awaitUpdate(first), "hello from callee and goodbye from callee");
+
+    try std.testing.expectEqual(before, try outstandingBytes(&pocket, caller_id));
+}
+
+test "a trapping continuation leaves its message in the canister log" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+    const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_chained_trapping", "");
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    try std.testing.expectEqual(pic.RejectCode.CanisterError, rej.code);
+
+    const logs = try pocket.canisterLogs(caller_id, .{});
+    defer logs.deinit();
+    for (logs.value) |record| {
+        if (std.mem.indexOf(u8, record.content, "trapping on purpose") != null) break;
+    } else return error.TrapNotLogged;
+}
+
+test "an undecodable reply reaches onUndecodable with its bytes" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+
+    const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_undecodable_handled", "");
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    const msg = rej.message;
+    try std.testing.expectEqual(pic.RejectCode.CanisterReject, rej.code);
+    try std.testing.expectEqualStrings("hello from callee", msg);
+
+    try std.testing.expectEqual(@as(u32, 1), try greetingsFreed(&pocket, caller_id));
+}
+
+test "an undecodable reply traps without onUndecodable" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    const caller_id = try installPair(&pocket);
+
+    const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_undecodable_trapping", "");
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    const msg = rej.message;
+    try std.testing.expectEqual(pic.RejectCode.CanisterError, rej.code);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "could not decode the reply") != null);
+
+    // The trap rolled the callback back, and cleanup released the slot.
     try std.testing.expectEqual(@as(u32, 1), try greetingsFreed(&pocket, caller_id));
 }
 
@@ -304,8 +372,9 @@ test "a comptime-known callee reaches the right canister" {
         "call_comptime_callee",
         "",
     );
-    const msg = try expectReject(result);
-    defer allocator.free(msg);
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    const msg = rej.message;
     // Naming the callee proves the bytes reached the system; a length check
     // also passes on the probe's own rejects, including the never-left one.
     try std.testing.expect(std.mem.indexOf(u8, msg, absent_callee) != null);
@@ -328,7 +397,8 @@ test "caller calls non-existent canister" {
     );
 
     const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_greet", "");
-    const msg = try expectReject(result);
-    defer allocator.free(msg);
+    const rej = try expectReject(result);
+    defer rej.deinit(allocator);
+    const msg = rej.message;
     try std.testing.expect(msg.len > 0);
 }

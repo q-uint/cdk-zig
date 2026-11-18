@@ -17,9 +17,9 @@ fn callUpdate(pocket: *pic.PocketIc, cid: cdk.principal.Principal, method: []con
     const result = try pocket.updateCall(cid, cdk.principal.anonymous, method, "");
     switch (result) {
         .reply => |data| allocator.free(data),
-        .reject => |msg| {
-            defer allocator.free(msg);
-            std.debug.print("rejected: {s}\n", .{msg});
+        .reject => |rej| {
+            defer rej.deinit(allocator);
+            std.debug.print("rejected: {s}\n", .{rej.message});
             return error.Rejected;
         },
     }
@@ -121,8 +121,8 @@ test "__get_cycles returns instruction count" {
             const cycles = std.mem.readInt(i64, data[0..8], .little);
             try std.testing.expect(cycles > 0);
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(allocator);
             return error.Rejected;
         },
     }

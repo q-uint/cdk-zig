@@ -111,12 +111,12 @@ pub const cdk_codec = cdk.CandidCodec;
 Any type with these works:
 
 ```zig
-fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8
-fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) T
+fn encode(a: std.mem.Allocator, comptime T: type, value: T) ![]const u8
+fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) !T
 ```
 
-`a` is freed when the message ends. The codec covers arguments, replies and
-calls. `cdk.queryWith(Codec, f, name)` and `cdk.updateWith` override it for
+An argument that fails to decode rejects the message.
+`cdk.queryWith(Codec, f, name)` and `cdk.updateWith` override the codec for
 one endpoint, `.codec` for one call. See [examples/json](examples/json/).
 
 ### Timers
@@ -166,6 +166,9 @@ fn callOther() cdk.Transition([]const u8) {
   `Transition(T)`, since it answers the same caller.
 - A continuation borrows its reply, and may take an allocator first, like a
   handler.
+- A reply that does not decode traps. The callee did its work though, so a
+  call whose outcome matters, a transfer say, passes `.onUndecodable` to
+  record it. It gets the pending state and the raw bytes.
 
 ### Carrying state across a commit
 
@@ -266,7 +269,8 @@ flamegraphs of instructions, heap and stable memory. Free when disabled. See
   `wasm32-freestanding`, or wasm64 with `.{ .wasm64 = true }`. Returns the
   `*Compile` step.
 - `addTests(b, dep)` adds a `test` step running `test.zig` against PocketIC.
-  Returns the `*Run` step.
+  Returns the `*Run` step. `pocket.canister(Codec, id)` gives typed calls, see
+  [examples/json](examples/json/test.zig).
 
 ## Examples
 

@@ -108,7 +108,47 @@ fn call_comptime_callee() Probe {
     );
 }
 
+// greet replies with text, so a continuation expecting a u64 cannot decode
+// it. Both calls hold pending state, to show it is released either way.
+fn numberReply(_: Held, _: u64) Probe {
+    return .reject("the reply was supposed to be undecodable");
+}
+
+// Rejects with the raw reply, proving the bytes arrived.
+fn keptUndecodable(_: Held, reply: cdk.Undecodable) Probe {
+    return .reject(reply.bytes);
+}
+
+fn undecodableCall(comptime handled: bool) Probe {
+    const callee = caller.callee_principal orelse
+        return .reject("callee principal not set, pass it as init arg");
+    const kept = cdk.persistent.dupe(u8, "pending") catch return .reject("out of memory");
+    const spec = if (handled) .{
+        .onReply = numberReply,
+        .onUndecodable = keptUndecodable,
+        .onFinish = Held.deinit,
+    } else .{
+        .onReply = numberReply,
+        .onFinish = Held.deinit,
+    };
+    return .commit(spec, .{
+        .callee = callee,
+        .method = "greet",
+        .pending = Held{ .text = kept },
+    });
+}
+
+fn call_undecodable_handled() Probe {
+    return undecodableCall(true);
+}
+
+fn call_undecodable_trapping() Probe {
+    return undecodableCall(false);
+}
+
 comptime {
+    cdk.update(call_undecodable_handled, "call_undecodable_handled");
+    cdk.update(call_undecodable_trapping, "call_undecodable_trapping");
     cdk.update(call_comptime_callee, "call_comptime_callee");
     cdk.update(call_chained_rejecting, "call_chained_rejecting");
     cdk.update(call_chained_trapping, "call_chained_trapping");

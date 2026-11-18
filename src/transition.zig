@@ -23,6 +23,7 @@ pub const Raw = codec.Raw;
 pub const Error = error{
     CallPerformFailed,
     TooManyCallsInFlight,
+    ArgumentEncodingFailed,
 };
 
 const options = if (@hasDecl(root, "cdk_options")) root.cdk_options else struct {};
@@ -45,6 +46,14 @@ pub const Outcome = enum(u8) {
 pub const Rejection = struct {
     code: u32,
     message: []const u8,
+};
+
+/// A reply that arrived but did not decode. The callee did its work, so the
+/// outcome is known to it but not to us. `bytes` lasts until the message
+/// ends, so copy it to keep it.
+pub const Undecodable = struct {
+    bytes: []const u8,
+    err: anyerror,
 };
 
 var call_performed: bool = false;
@@ -92,12 +101,14 @@ pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type 
         pub const Codec = ReplyCodec;
 
         pub fn reply(value: Reply) Self {
-            return replyRaw(Codec.encode(memory.scratch, Reply, value));
+            return replyWith(Codec, value);
         }
 
         /// Reply in a format other than `Codec`.
         pub fn replyWith(comptime Other: type, value: Reply) Self {
-            return replyRaw(Other.encode(memory.scratch, Reply, value));
+            const bytes = Other.encode(memory.scratch, Reply, value) catch |err|
+                return reject(failure("could not encode the reply", err));
+            return replyRaw(bytes);
         }
 
         /// Reply with bytes as they are. Nothing checks they encode a `Reply`.
@@ -125,6 +136,7 @@ pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type 
             return reject(switch (err) {
                 Error.CallPerformFailed => "cdk: call_perform failed",
                 Error.TooManyCallsInFlight => "cdk: too many calls in flight",
+                Error.ArgumentEncodingFailed => "cdk: could not encode the call argument",
             });
         }
 
@@ -152,6 +164,9 @@ pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type 
         ///     .onReject  fn (Rejection) Self, defaults to forwardReject
         ///     .onError   fn (Error) Self, runs instead when the call is never
         ///                sent, defaults to rejectError
+        ///     .onUndecodable  fn (Undecodable) Self, runs when the callee
+        ///                replied but the reply did not decode, defaults to
+        ///                trapping
         ///     .onFinish  fn (Pending) void, runs on every exit
         ///     .capacity  calls carrying pending state that may be in flight
         ///
@@ -169,7 +184,7 @@ pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type 
         ///     .timeout_seconds
         pub fn commit(comptime spec: anytype, request: anytype) Self {
             comptime checkFields(@TypeOf(spec), &.{
-                "codec", "onReply", "onReject", "onError", "onFinish", "capacity",
+                "codec", "onReply", "onReject", "onError", "onUndecodable", "onFinish", "capacity",
             });
             const onError = if (@hasField(@TypeOf(spec), "onError")) spec.onError else rejectError;
             if (@TypeOf(onError) != fn (Error) Self and @TypeOf(onError) != fn (std.mem.Allocator, Error) Self)
@@ -196,8 +211,9 @@ pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type 
             else
                 defaultReject(shapeOf(spec.onReply, "onReply", Self).Pending);
 
+            const onUndecodable = if (@hasField(Spec, "onUndecodable")) spec.onUndecodable else null;
             const onFinish = if (@hasField(Spec, "onFinish")) spec.onFinish else null;
-            const handlers = Handlers(Self, CallCodec, spec.onReply, onReject, onFinish, capacity);
+            const handlers = Handlers(Self, CallCodec, spec.onReply, onReject, onUndecodable, onFinish, capacity);
 
             if (handlers.carries_pending != @hasField(Request, "pending")) {
                 @compileError(if (handlers.carries_pending)
@@ -233,7 +249,8 @@ pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type 
             }
 
             if (@hasField(Request, "arg")) {
-                const payload = CallCodec.encode(memory.scratch, @TypeOf(request.arg), request.arg);
+                const payload = CallCodec.encode(memory.scratch, @TypeOf(request.arg), request.arg) catch
+                    return Error.ArgumentEncodingFailed;
                 if (payload.len > 0) ic0.call_data_append(payload.ptr, @intCast(payload.len));
             }
             if (@hasField(Request, "cycles")) {
@@ -312,6 +329,7 @@ fn Handlers(
     comptime Codec: type,
     comptime onReply: anytype,
     comptime onReject: anytype,
+    comptime onUndecodable: anytype,
     comptime onFinish: anytype,
     comptime capacity: u16,
 ) type {
@@ -324,6 +342,15 @@ fn Handlers(
         @compileError("onReject's last parameter must be Rejection");
     if (reject_shape.Pending != Pending)
         @compileError("onReply and onReject must agree on the pending state type");
+
+    const handles_undecodable = @TypeOf(onUndecodable) != @TypeOf(null);
+    if (handles_undecodable) {
+        const undecodable_shape = shapeOf(onUndecodable, "onUndecodable", T);
+        if (undecodable_shape.Payload != Undecodable)
+            @compileError("onUndecodable's last parameter must be Undecodable");
+        if (undecodable_shape.Pending != Pending)
+            @compileError("onReply and onUndecodable must agree on the pending state type");
+    }
 
     return struct {
         const carries_pending = shape.carriesPending();
@@ -375,12 +402,32 @@ fn Handlers(
             beginMessage();
             defer memory.endMessage();
             const pending = take(env);
-            const decoded = Codec.decode(memory.scratch, Reply, readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy));
+            const bytes = readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy);
+            const decoded = Codec.decode(memory.scratch, Reply, bytes) catch |err| {
+                undecodable(pending, .{ .bytes = bytes, .err = err });
+                return;
+            };
             if (comptime carries_pending) {
                 defer finish(pending);
                 checkOutcome(invoke(onReply, .{ pending, decoded }).outcome);
             } else {
                 checkOutcome(invoke(onReply, .{decoded}).outcome);
+            }
+        }
+
+        // The callee replied, so whatever it did happened, but the reply did
+        // not decode. That is not a rejection, and an onReject that undoes
+        // work would undo work that was done. Without onUndecodable this
+        // traps: the callback rolls back, cleanup finishes the pending state,
+        // and the caller sees the trap.
+        fn undecodable(pending: Pending, reply: Undecodable) void {
+            if (comptime !handles_undecodable) {
+                trap(failure("could not decode the reply", reply.err));
+            } else if (comptime carries_pending) {
+                defer finish(pending);
+                checkOutcome(invoke(onUndecodable, .{ pending, reply }).outcome);
+            } else {
+                checkOutcome(invoke(onUndecodable, .{reply}).outcome);
             }
         }
 
@@ -477,7 +524,11 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptim
             beginMessage();
             defer memory.endMessage();
             const data = readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy);
-            checkOutcome(outcomeOf(func, Codec, .{Codec.decode(memory.scratch, Arg, data)}));
+            const arg = Codec.decode(memory.scratch, Arg, data) catch |err| {
+                refuse(context, failure("could not decode the argument", err));
+                return;
+            };
+            checkOutcome(outcomeOf(func, Codec, .{arg}));
         }
     }.f;
 }
@@ -507,6 +558,22 @@ fn readMessage(comptime size: anytype, comptime copy: anytype) []const u8 {
     const buf = memory.scratch.alloc(u8, len) catch trap("cdk: out of memory");
     if (len > 0) copy(buf.ptr, 0, @intCast(len));
     return buf;
+}
+
+// Rejects where the context allows it. init, post_upgrade and
+// inspect_message cannot reject, so there it traps.
+fn refuse(comptime context: ic0.Context, message: []const u8) void {
+    if (comptime ic0_spec.allows("msg_reject", context)) {
+        _ = Transition(void).reject(message);
+    } else {
+        trap(message);
+    }
+}
+
+// "cdk: <what>: <error name>", for a reject or trap message.
+fn failure(comptime what: []const u8, err: anyerror) []const u8 {
+    return std.fmt.allocPrint(memory.scratch, "cdk: " ++ what ++ ": {s}", .{@errorName(err)}) catch
+        "cdk: " ++ what;
 }
 
 fn trap(message: []const u8) noreturn {

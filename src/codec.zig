@@ -2,10 +2,11 @@
 //!
 //! Any format works, Candid, CBOR, protobuf, as long as it provides:
 //!
-//!     fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8
-//!     fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) T
+//!     fn encode(a: std.mem.Allocator, comptime T: type, value: T) ![]const u8
+//!     fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) !T
 //!
-//! `a` is freed when the message ends, so neither needs to free anything.
+//! `a` is freed when the message ends, so neither needs to free anything. An
+//! argument that fails to decode rejects the message, naming the error.
 
 const std = @import("std");
 const root = @import("root");
@@ -17,19 +18,18 @@ pub const default = if (@hasDecl(root, "cdk_codec")) root.cdk_codec else Raw;
 
 /// Bytes as they are, and integers as little-endian bytes of their own size.
 pub const Raw = struct {
-    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) []const u8 {
+    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) error{OutOfMemory}![]const u8 {
         if (comptime isBytes(T)) return value;
         comptime checkInt(T);
-        const out = a.alloc(u8, @sizeOf(T)) catch @panic("raw: out of memory");
+        const out = try a.alloc(u8, @sizeOf(T));
         std.mem.writeInt(T, out[0..@sizeOf(T)], value, .little);
         return out;
     }
 
-    pub fn decode(_: std.mem.Allocator, comptime T: type, bytes: []const u8) T {
+    pub fn decode(_: std.mem.Allocator, comptime T: type, bytes: []const u8) error{WrongLength}!T {
         if (comptime T == []const u8) return bytes;
         comptime checkInt(T);
-        if (bytes.len != @sizeOf(T))
-            @panic(std.fmt.comptimePrint("raw: expected {d} bytes for {s}", .{ @sizeOf(T), @typeName(T) }));
+        if (bytes.len != @sizeOf(T)) return error.WrongLength;
         return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
     }
 

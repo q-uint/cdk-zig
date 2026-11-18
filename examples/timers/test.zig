@@ -21,9 +21,9 @@ fn getCounter(pocket: *pic.PocketIc, canister_id: cdk.principal.Principal) !u32 
             if (data.len < 4) return error.InvalidReply;
             return std.mem.readInt(u32, data[0..4], .little);
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
-            std.debug.print("rejected: {s}\n", .{msg});
+        .reject => |rej| {
+            defer rej.deinit(allocator);
+            std.debug.print("rejected: {s}\n", .{rej.message});
             return error.Rejected;
         },
     }
@@ -95,8 +95,8 @@ test "cancel timer stops firing" {
     const stop_result = try pocket.updateCall(cid, cdk.principal.anonymous, "stop_interval", "");
     switch (stop_result) {
         .reply => |data| allocator.free(data),
-        .reject => |msg| {
-            defer allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(allocator);
             return error.Rejected;
         },
     }
@@ -143,9 +143,9 @@ test "query non-existent method on timer canister" {
             defer allocator.free(data);
             return error.ExpectedReject;
         },
-        .reject => |msg| {
-            defer allocator.free(msg);
-            try std.testing.expect(msg.len > 0);
+        .reject => |rej| {
+            defer rej.deinit(allocator);
+            try std.testing.expect(rej.message.len > 0);
         },
     }
 }
@@ -164,8 +164,8 @@ test "double cancel is safe" {
     const stop1 = try pocket.updateCall(cid, cdk.principal.anonymous, "stop_interval", "");
     switch (stop1) {
         .reply => |data| allocator.free(data),
-        .reject => |msg| {
-            defer allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(allocator);
             return error.Rejected;
         },
     }
@@ -173,8 +173,8 @@ test "double cancel is safe" {
     const stop2 = try pocket.updateCall(cid, cdk.principal.anonymous, "stop_interval", "");
     switch (stop2) {
         .reply => |data| allocator.free(data),
-        .reject => |msg| {
-            defer allocator.free(msg);
+        .reject => |rej| {
+            defer rej.deinit(allocator);
             return error.Rejected;
         },
     }
