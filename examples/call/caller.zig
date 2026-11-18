@@ -40,7 +40,7 @@ const Greeting = struct {
     text: []const u8,
 
     fn deinit(self: Greeting) void {
-        cdk.allocator.free(self.text);
+        cdk.persistent.free(self.text);
     }
 };
 
@@ -54,9 +54,9 @@ fn chainedGreetReplied(data: []const u8) cdk.Transition([]const u8) {
     const callee = callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
 
-    // Copied, because the reply buffer is freed when this continuation
-    // returns.
-    const kept = cdk.allocator.dupe(u8, data) catch return .reject("out of memory");
+    // Copied to persistent memory, because the reply buffer is freed when
+    // this continuation returns.
+    const kept = cdk.persistent.dupe(u8, data) catch return .reject("out of memory");
 
     // If the call is never sent, the CDK finishes the pending state itself,
     // so the copy above is not leaked.
@@ -70,16 +70,13 @@ fn chainedGreetReplied(data: []const u8) cdk.Transition([]const u8) {
     });
 }
 
-fn chainedFarewellReplied(greeting: Greeting, data: []const u8) cdk.Transition([]const u8) {
-    const first = greeting.text;
-    const separator = " and ";
-    const combined = cdk.allocator.alloc(u8, first.len + separator.len + data.len) catch
+fn chainedFarewellReplied(
+    scratch: std.mem.Allocator,
+    greeting: Greeting,
+    data: []const u8,
+) cdk.Transition([]const u8) {
+    const combined = std.mem.concat(scratch, u8, &.{ greeting.text, " and ", data }) catch
         return .reject("out of memory");
-    defer cdk.allocator.free(combined);
-
-    @memcpy(combined[0..first.len], first);
-    @memcpy(combined[first.len..][0..separator.len], separator);
-    @memcpy(combined[first.len + separator.len ..][0..data.len], data);
     return .reply(combined);
 }
 

@@ -76,7 +76,8 @@ comptime {
 }
 ```
 
-A handler takes at most one parameter, the decoded argument, and returns:
+A handler takes the decoded argument, optionally preceded by an allocator,
+and returns:
 
 | Returns | Effect |
 |---------|--------|
@@ -86,7 +87,17 @@ A handler takes at most one parameter, the decoded argument, and returns:
 | `void` | reply by hand with `cdk.replyRaw`, or not at all |
 
 The reply is encoded after the handler returns, so it must not point into
-the handler's stack.
+the handler's stack. Build it with the allocator instead, which the CDK frees
+when the message ends:
+
+```zig
+fn greet(scratch: std.mem.Allocator, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(scratch, "hello, {s}!", .{name});
+}
+```
+
+Decoded arguments live until the message ends too. Copy what you keep into
+`cdk.persistent`, which is never freed for you.
 
 ### Codecs
 
@@ -145,7 +156,8 @@ fn callOther() cdk.Transition([]const u8) {
   `.timeout_seconds`.
 - `.reply` only takes a `T`, and every continuation returns the same
   `Transition(T)`, since it answers the same caller.
-- A continuation borrows its reply. Copy anything kept beyond it.
+- A continuation borrows its reply, and may take an allocator first, like a
+  handler.
 
 ### Carrying state across a commit
 
@@ -157,7 +169,7 @@ const Transfer = struct {
     amount: u64,
 
     fn deinit(self: Transfer) void {
-        cdk.allocator.free(self.to);
+        cdk.persistent.free(self.to);
     }
 };
 

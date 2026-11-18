@@ -153,61 +153,43 @@ pub fn exit(comptime name: []const u8) void {
     appendEntry(-id);
 }
 
-pub fn getCyclesHandler() void {
-    const count: i64 = @intCast(cdk.instructionCounter());
-    cdk.replyRaw(std.mem.asBytes(&count));
+// The endpoints below are exported with the Raw codec, see export.zig.
+
+pub fn getCycles() i64 {
+    return @intCast(cdk.instructionCounter());
 }
 
-pub fn getProfilingHandler() void {
-    const arg = cdk.argData();
-    const page_idx: u32 = if (arg.len >= 4)
-        std.mem.readInt(u32, arg[0..4], .little)
-    else
-        0;
-
+// Reply format: the page's entries, then the next page as an i32, -1 if none.
+pub fn getProfiling(scratch: std.mem.Allocator, page: u32) ![]const u8 {
     const total = entries.items.len;
-    const start = @min(@as(usize, page_idx) * entries_per_page, total);
+    const start = @min(@as(usize, page) * entries_per_page, total);
     const end = @min(start + entries_per_page, total);
-    const slice = entries.items[start..end];
+    const next: i32 = if (end < total) @intCast(page + 1) else -1;
 
-    const has_next: i32 = if (end < total) @intCast(page_idx + 1) else -1;
-
-    const data_bytes = std.mem.sliceAsBytes(slice);
-    if (data_bytes.len != 0) {
-        cdk.ic0.msg_reply_data_append(data_bytes.ptr, @intCast(data_bytes.len));
-    }
-    cdk.ic0.msg_reply_data_append(
-        @ptrCast(std.mem.asBytes(&has_next)),
-        @sizeOf(i32),
-    );
-    cdk.ic0.msg_reply();
+    return std.mem.concat(scratch, u8, &.{
+        std.mem.sliceAsBytes(entries.items[start..end]),
+        std.mem.asBytes(&next),
+    });
 }
 
-pub fn getProfilingNamesHandler() void {
-    // Reply format: repeated [i32 id][u32 name_len][name bytes...]
-    const map_keys = name_map.keys();
-    const map_vals = name_map.values();
-    for (map_keys, map_vals) |id, name| {
-        cdk.ic0.msg_reply_data_append(
-            @ptrCast(std.mem.asBytes(&id)),
-            @sizeOf(i32),
-        );
+// Reply format: repeated [i32 id][u32 name_len][name bytes...]
+pub fn getProfilingNames(scratch: std.mem.Allocator) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (name_map.keys(), name_map.values()) |id, name| {
         const len: u32 = @intCast(name.len);
-        cdk.ic0.msg_reply_data_append(
-            @ptrCast(std.mem.asBytes(&len)),
-            @sizeOf(u32),
-        );
-        cdk.ic0.msg_reply_data_append(name.ptr, @intCast(name.len));
+        try out.appendSlice(scratch, std.mem.asBytes(&id));
+        try out.appendSlice(scratch, std.mem.asBytes(&len));
+        try out.appendSlice(scratch, name);
     }
-    cdk.ic0.msg_reply();
+    return out.items;
 }
 
-pub fn toggleTracingHandler() void {
+pub fn toggleTracing() void {
     tracing_enabled = !tracing_enabled;
     cdk.replyRaw("");
 }
 
-pub fn toggleEntryHandler() void {
+pub fn toggleEntry() void {
     entry_mode = !entry_mode;
     cdk.replyRaw("");
 }

@@ -4,9 +4,13 @@
 //!
 //!     fn encode(comptime T: type, value: T) []const u8
 //!     fn decode(comptime T: type, bytes: []const u8) T
+//!
+//! Both should allocate from `cdk.scratch`, which the CDK frees when the
+//! message ends.
 
 const std = @import("std");
 const root = @import("root");
+const scratch = @import("allocator.zig").scratch;
 
 /// Declare `cdk_codec` in your root source file to change it:
 ///
@@ -15,19 +19,11 @@ pub const default = if (@hasDecl(root, "cdk_codec")) root.cdk_codec else Raw;
 
 /// Bytes as they are, and integers as little-endian bytes of their own size.
 pub const Raw = struct {
-    // An encoded integer lives here until the next encode of the same type.
-    // Both callers copy it out straight away, into a reply or a call.
-    fn Scratch(comptime T: type) type {
-        return struct {
-            var bytes: [@sizeOf(T)]u8 = undefined;
-        };
-    }
-
     pub fn encode(comptime T: type, value: T) []const u8 {
         if (comptime isBytes(T)) return value;
         comptime checkInt(T);
-        const out = &Scratch(T).bytes;
-        std.mem.writeInt(T, out, value, .little);
+        const out = scratch.alloc(u8, @sizeOf(T)) catch @panic("raw: out of memory");
+        std.mem.writeInt(T, out[0..@sizeOf(T)], value, .little);
         return out;
     }
 

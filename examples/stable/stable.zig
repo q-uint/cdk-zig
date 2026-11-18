@@ -11,24 +11,18 @@ fn grow(pages: u64) u64 {
     return cdk.stableGrow(pages);
 }
 
-fn write() void {
-    const arg = cdk.argData();
-    if (arg.len < 8) {
-        cdk.reject("expected offset (u64) + payload");
-        return;
-    }
+fn write(arg: []const u8) void {
+    if (arg.len < 8) return cdk.reject("expected offset (u64) + payload");
     const offset = std.mem.readInt(u64, arg[0..8], .little);
-    const payload = arg[8..];
-    cdk.stableWrite(offset, payload);
+    cdk.stableWrite(offset, arg[8..]);
     cdk.replyRaw("");
 }
 
-fn read() ![]const u8 {
-    const arg = cdk.argData();
+fn read(scratch: std.mem.Allocator, arg: []const u8) ![]const u8 {
     if (arg.len < 16) return error.ExpectedOffsetAndLength;
     const offset = std.mem.readInt(u64, arg[0..8], .little);
     const len = std.mem.readInt(u64, arg[8..16], .little);
-    const buf = try cdk.allocator.alloc(u8, @intCast(len));
+    const buf = try scratch.alloc(u8, @intCast(len));
     cdk.stableRead(offset, buf);
     return buf;
 }
@@ -45,9 +39,9 @@ fn streamWrite(payload: []const u8) !u64 {
     return w.currentOffset();
 }
 
-fn streamRead(len: u64) ![]const u8 {
+fn streamRead(scratch: std.mem.Allocator, len: u64) ![]const u8 {
     var r = cdk.stable.Reader.init(0);
-    const buf = try cdk.allocator.alloc(u8, @intCast(len));
+    const buf = try scratch.alloc(u8, @intCast(len));
     const n = try r.readSlice(buf);
     return buf[0..n];
 }

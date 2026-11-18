@@ -15,18 +15,27 @@ pub const hash_tree = @import("hash_tree.zig");
 pub const timers = @import("timers.zig");
 pub const profiling = @import("profiling.zig");
 
-pub const allocator = @import("allocator.zig").default;
+const allocator = @import("allocator.zig").default;
+const scratch = @import("allocator.zig").scratch;
+
+/// For memory that outlives the message: canister state, and pending state
+/// carried across a call. Whatever is allocated here must be freed by hand.
+///
+/// Memory for one message, a reply say, comes from the `std.mem.Allocator` a
+/// handler may take as its first parameter. The CDK frees that when the
+/// message ends.
+pub const persistent = allocator;
 
 pub const assert = @import("assert.zig").assert;
 
 pub const CandidCodec = struct {
     pub fn encode(comptime T: type, value: T) []const u8 {
-        return candid.encode(allocator, .{value}) catch
+        return candid.encode(scratch, .{value}) catch
             @panic("candid encode failed");
     }
 
     pub fn decode(comptime T: type, bytes: []const u8) T {
-        return candid.decode(T, allocator, bytes) catch
+        return candid.decode(T, scratch, bytes) catch
             @panic("candid decode failed");
     }
 };
@@ -90,11 +99,12 @@ pub fn caller() principal.Principal {
     return p;
 }
 
-pub fn argData() []const u8 {
+/// The raw argument, bypassing `cdk_codec`. A handler normally takes it as
+/// its parameter instead.
+pub fn argData(a: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     const size: usize = @intCast(ic0.msg_arg_data_size());
     if (size == 0) return &.{};
-    const buf = allocator.alloc(u8, size) catch
-        @panic("failed to allocate memory");
+    const buf = try a.alloc(u8, size);
     ic0.msg_arg_data_copy(buf.ptr, 0, @intCast(size));
     return buf;
 }
@@ -103,11 +113,10 @@ pub fn msgRejectCode() RejectCode {
     return @fromBackingInt(@intCast(@as(u32, @intCast(ic0.msg_reject_code()))));
 }
 
-pub fn msgRejectMsg() []const u8 {
+pub fn msgRejectMsg(a: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     const len: usize = @intCast(ic0.msg_reject_msg_size());
     if (len == 0) return &.{};
-    const buf = allocator.alloc(u8, len) catch
-        @panic("failed to allocate memory");
+    const buf = try a.alloc(u8, len);
     ic0.msg_reject_msg_copy(buf.ptr, 0, @intCast(len));
     return buf;
 }
@@ -116,11 +125,10 @@ pub fn msgDeadline() u64 {
     return @intCast(ic0.msg_deadline());
 }
 
-pub fn msgMethodName() []const u8 {
+pub fn msgMethodName(a: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     const len: usize = @intCast(ic0.msg_method_name_size());
     if (len == 0) return &.{};
-    const buf = allocator.alloc(u8, len) catch
-        @panic("failed to allocate memory");
+    const buf = try a.alloc(u8, len);
     ic0.msg_method_name_copy(buf.ptr, 0, @intCast(len));
     return buf;
 }
@@ -243,19 +251,17 @@ pub fn certifiedDataSet(data: []const u8) void {
     ic0.certified_data_set(data.ptr, @intCast(data.len));
 }
 
-pub fn dataCertificate() ?[]const u8 {
+pub fn dataCertificate(a: std.mem.Allocator) std.mem.Allocator.Error!?[]const u8 {
     if (ic0.data_certificate_present() == 0) return null;
     const len: usize = @intCast(ic0.data_certificate_size());
-    const buf = allocator.alloc(u8, len) catch
-        @panic("failed to allocate memory");
+    const buf = try a.alloc(u8, len);
     ic0.data_certificate_copy(buf.ptr, 0, @intCast(len));
     return buf;
 }
 
-pub fn rootKey() []const u8 {
+pub fn rootKey(a: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
     const len: usize = @intCast(ic0.root_key_size());
-    const buf = allocator.alloc(u8, len) catch
-        @panic("failed to allocate memory");
+    const buf = try a.alloc(u8, len);
     ic0.root_key_copy(buf.ptr, 0, @intCast(len));
     return buf;
 }
@@ -328,11 +334,10 @@ pub fn envVarCount() usize {
     return @intCast(ic0.env_var_count());
 }
 
-pub fn envVarName(index: usize) []const u8 {
+pub fn envVarName(a: std.mem.Allocator, index: usize) std.mem.Allocator.Error![]const u8 {
     const len: usize = @intCast(ic0.env_var_name_size(@intCast(index)));
     if (len == 0) return &.{};
-    const buf = allocator.alloc(u8, len) catch
-        @panic("failed to allocate memory");
+    const buf = try a.alloc(u8, len);
     ic0.env_var_name_copy(@intCast(index), buf.ptr, 0, @intCast(len));
     return buf;
 }
@@ -341,11 +346,10 @@ pub fn envVarNameExists(name: []const u8) bool {
     return ic0.env_var_name_exists(name.ptr, @intCast(name.len)) != 0;
 }
 
-pub fn envVarValue(name: []const u8) []const u8 {
+pub fn envVarValue(a: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![]const u8 {
     const len: usize = @intCast(ic0.env_var_value_size(name.ptr, @intCast(name.len)));
     if (len == 0) return &.{};
-    const buf = allocator.alloc(u8, len) catch
-        @panic("failed to allocate memory");
+    const buf = try a.alloc(u8, len);
     ic0.env_var_value_copy(name.ptr, @intCast(name.len), buf.ptr, 0, @intCast(len));
     return buf;
 }

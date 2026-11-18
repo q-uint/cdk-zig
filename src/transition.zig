@@ -16,7 +16,7 @@ const ic0 = @import("ic0.zig");
 const ic0_spec = @import("ic0_spec.zig");
 const root = @import("root");
 
-const allocator = @import("allocator.zig").default;
+const memory = @import("allocator.zig");
 
 pub const Raw = codec.Raw;
 
@@ -152,7 +152,8 @@ pub fn Transition(comptime ReplyType: type) type {
         ///     .capacity  calls carrying pending state that may be in flight
         ///
         /// Every handler returns `Self`, since it answers the caller of the
-        /// message that sent the call.
+        /// message that sent the call, and may take a `std.mem.Allocator`
+        /// first for memory that lasts until its message ends.
         ///
         /// A continuation borrows its reply or rejection for the duration of
         /// the call. The buffer is freed when it returns, so anything kept
@@ -167,10 +168,11 @@ pub fn Transition(comptime ReplyType: type) type {
                 "codec", "onReply", "onReject", "onError", "onFinish", "capacity",
             });
             const onError = if (@hasField(@TypeOf(spec), "onError")) spec.onError else rejectError;
-            if (@TypeOf(onError) != fn (Error) Self)
-                @compileError("onError must be fn (Error) " ++ @typeName(Self));
+            if (@TypeOf(onError) != fn (Error) Self and @TypeOf(onError) != fn (std.mem.Allocator, Error) Self)
+                @compileError("onError must be fn (Error) " ++ @typeName(Self) ++
+                    ", optionally taking an allocator first");
 
-            send(spec, request) catch |err| return onError(err);
+            send(spec, request) catch |err| return invoke(onError, .{err});
             return .{ .outcome = .sent };
         }
 
@@ -270,14 +272,28 @@ fn shapeOf(comptime handler: anytype, comptime name: []const u8, comptime Return
             ", the Transition of the message that sent the call");
 
     const generic = name ++ " may not take a generic parameter";
-    return switch (f.param_types.len) {
-        1 => .{ .Pending = void, .Payload = f.param_types[0] orelse @compileError(generic) },
+    const params = f.param_types[@intFromBool(takesScratch(handler))..];
+    return switch (params.len) {
+        1 => .{ .Pending = void, .Payload = params[0] orelse @compileError(generic) },
         2 => .{
-            .Pending = f.param_types[0] orelse @compileError(generic),
-            .Payload = f.param_types[1] orelse @compileError(generic),
+            .Pending = params[0] orelse @compileError(generic),
+            .Payload = params[1] orelse @compileError(generic),
         },
-        else => @compileError(name ++ " takes the reply, optionally preceded by pending state"),
+        else => @compileError(name ++ " takes the reply, optionally preceded by " ++
+            "an allocator and pending state"),
     };
+}
+
+// A handler asks for memory that lasts until the message ends by taking a
+// std.mem.Allocator first. The CDK frees it all once the message ends.
+fn takesScratch(comptime func: anytype) bool {
+    const params = @typeInfo(@TypeOf(func)).@"fn".param_types;
+    return params.len > 0 and (params[0] orelse void) == std.mem.Allocator;
+}
+
+fn invoke(comptime func: anytype, args: anytype) @typeInfo(@TypeOf(func)).@"fn".return_type.? {
+    if (comptime takesScratch(func)) return @call(.auto, func, .{memory.scratch} ++ args);
+    return @call(.auto, func, args);
 }
 
 // Pending state lives in a fixed array inside this type, which is generated
@@ -350,40 +366,30 @@ fn Handlers(
 
         fn replyCallback(env: ic0.I) callconv(.c) void {
             beginMessage();
+            defer memory.endMessage();
             const pending = take(env);
-            const size: usize = @intCast(ic0.msg_arg_data_size());
-            const data = allocator.alloc(u8, size) catch
-                @panic("failed to allocate reply data");
-            defer allocator.free(data);
-            if (size > 0) ic0.msg_arg_data_copy(data.ptr, 0, @intCast(size));
-
-            const decoded = Codec.decode(Reply, data);
+            const decoded = Codec.decode(Reply, readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy));
             if (comptime carries_pending) {
                 defer finish(pending);
-                checkOutcome(onReply(pending, decoded).outcome);
+                checkOutcome(invoke(onReply, .{ pending, decoded }).outcome);
             } else {
-                checkOutcome(onReply(decoded).outcome);
+                checkOutcome(invoke(onReply, .{decoded}).outcome);
             }
         }
 
         fn rejectCallback(env: ic0.I) callconv(.c) void {
             beginMessage();
+            defer memory.endMessage();
             const pending = take(env);
-            const size: usize = @intCast(ic0.msg_reject_msg_size());
-            const message = allocator.alloc(u8, size) catch
-                @panic("failed to allocate reject message");
-            defer allocator.free(message);
-            if (size > 0) ic0.msg_reject_msg_copy(message.ptr, 0, @intCast(size));
-
             const rejection = Rejection{
                 .code = @intCast(ic0.msg_reject_code()),
-                .message = message,
+                .message = readMessage(ic0.msg_reject_msg_size, ic0.msg_reject_msg_copy),
             };
             if (comptime carries_pending) {
                 defer finish(pending);
-                checkOutcome(onReject(pending, rejection).outcome);
+                checkOutcome(invoke(onReject, .{ pending, rejection }).outcome);
             } else {
-                checkOutcome(onReject(rejection).outcome);
+                checkOutcome(invoke(onReject, .{rejection}).outcome);
             }
         }
 
@@ -407,7 +413,10 @@ fn Handlers(
 /// reply, the same as returning `.reply(value)`. Returned as an error union,
 /// an error rejects the message with the error's name. A `Transition` is only
 /// needed to send a call, or to reject with text other than an error name.
-pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context) fn () void {
+///
+/// A handler that allocates its reply takes a `std.mem.Allocator` first. Its
+/// memory, like the decoded argument's, lasts until the message ends.
+pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptime Codec: type) fn () void {
     const info = @typeInfo(@TypeOf(func)).@"fn";
     const Returns = info.return_type orelse
         @compileError("an entry point may not have a generic return type");
@@ -424,17 +433,20 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context) fn () v
         @compileError("this entry point runs in a context that cannot reply, " ++
             "so its handler must return void, not " ++ @typeName(Returns));
 
-    if (info.param_types.len == 0) {
+    const params = info.param_types[@intFromBool(takesScratch(func))..];
+
+    if (params.len == 0) {
         return struct {
             fn f() void {
                 beginMessage();
-                checkOutcome(outcomeOf(func, .{}));
+                defer memory.endMessage();
+                checkOutcome(outcomeOf(func, Codec, .{}));
             }
         }.f;
     }
 
-    if (info.param_types.len != 1)
-        @compileError("an entry point takes at most one parameter, the decoded argument");
+    if (params.len != 1)
+        @compileError("an entry point takes the decoded argument, optionally preceded by an allocator");
 
     // Reading the argument means calling msg_arg_data, which the spec does
     // not permit from every entry point. A pre_upgrade or timer handler has
@@ -443,39 +455,44 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context) fn () v
         @compileError("this entry point runs in a context with no message argument, " ++
             "so its handler cannot take one");
 
-    const Arg = info.param_types[0] orelse
+    const Arg = params[0] orelse
         @compileError("an entry point may not take a generic parameter");
 
     return struct {
         fn f() void {
             beginMessage();
-            const size: usize = @intCast(ic0.msg_arg_data_size());
-            const data = allocator.alloc(u8, size) catch
-                @panic("failed to allocate argument data");
-            defer allocator.free(data);
-            if (size > 0) ic0.msg_arg_data_copy(data.ptr, 0, @intCast(size));
-
-            checkOutcome(outcomeOf(func, .{codec.default.decode(Arg, data)}));
+            defer memory.endMessage();
+            const data = readMessage(ic0.msg_arg_data_size, ic0.msg_arg_data_copy);
+            checkOutcome(outcomeOf(func, Codec, .{Codec.decode(Arg, data)}));
         }
     }.f;
 }
 
 // Null stands for an entry point returning void, which checkOutcome reads as
 // one that cannot state an outcome.
-fn outcomeOf(comptime func: anytype, args: anytype) ?Outcome {
+fn outcomeOf(comptime func: anytype, comptime Codec: type, args: anytype) ?Outcome {
     const Returns = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
     if (comptime Returns == void) {
-        @call(.auto, func, args);
+        invoke(func, args);
         return null;
     }
-    if (comptime isTransition(Returns)) return @call(.auto, func, args).outcome;
+    if (comptime isTransition(Returns)) return invoke(func, args).outcome;
     if (comptime @typeInfo(Returns) == .error_union) {
         const T = Transition(@typeInfo(Returns).error_union.payload);
-        const value = @call(.auto, func, args) catch |err|
+        const value = invoke(func, args) catch |err|
             return T.reject(@errorName(err)).outcome;
-        return T.reply(value).outcome;
+        return T.replyWith(Codec, value).outcome;
     }
-    return Transition(Returns).reply(@call(.auto, func, args)).outcome;
+    return Transition(Returns).replyWith(Codec, invoke(func, args)).outcome;
+}
+
+// Copies the message's argument or reject text into scratch memory, which
+// lasts until the message ends.
+fn readMessage(comptime size: anytype, comptime copy: anytype) []const u8 {
+    const len: usize = @intCast(size());
+    const buf = memory.scratch.alloc(u8, len) catch trap("cdk: out of memory");
+    if (len > 0) copy(buf.ptr, 0, @intCast(len));
+    return buf;
 }
 
 fn trap(message: []const u8) noreturn {

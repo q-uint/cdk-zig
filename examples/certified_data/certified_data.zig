@@ -25,21 +25,20 @@ fn init() void {
     initTree();
 }
 
-fn set() void {
-    const arg = cdk.argData();
-    setTree(arg);
+// The argument lasts only for this message, so the kept value is a copy.
+fn set(value: []const u8) void {
+    const kept = cdk.persistent.dupe(u8, value) catch return cdk.reject("out of memory");
+    cdk.persistent.free(stored_value);
+    setTree(kept);
     cdk.replyRaw("");
 }
 
 // Query that returns the stored value along with the data certificate.
 // Reply format: [32 bytes root_hash] [certificate bytes]
 // The certificate is only available during query calls.
-fn getWithProof() ![]const u8 {
-    const cert = cdk.dataCertificate() orelse return error.NoCertificate;
-    const reply = try cdk.allocator.alloc(u8, 32 + cert.len);
-    @memcpy(reply[0..32], &root_hash);
-    @memcpy(reply[32..], cert);
-    return reply;
+fn getWithProof(scratch: std.mem.Allocator) ![]const u8 {
+    const cert = try cdk.dataCertificate(scratch) orelse return error.NoCertificate;
+    return std.mem.concat(scratch, u8, &.{ &root_hash, cert });
 }
 
 fn get() []const u8 {

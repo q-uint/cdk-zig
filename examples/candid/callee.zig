@@ -7,10 +7,8 @@ const Greeting = struct {
     greeting: []const u8,
 };
 
-fn greet(name: []const u8) Greeting {
-    const msg = std.fmt.allocPrint(cdk.allocator, "hello, {s}!", .{name}) catch
-        @panic("failed to format greeting");
-    return .{ .greeting = msg };
+fn greet(scratch: std.mem.Allocator, name: []const u8) !Greeting {
+    return .{ .greeting = try std.fmt.allocPrint(scratch, "hello, {s}!", .{name}) };
 }
 
 comptime {

@@ -25,7 +25,7 @@ const Held = struct {
     text: []const u8,
 
     fn deinit(self: Held) void {
-        cdk.allocator.free(self.text);
+        cdk.persistent.free(self.text);
         released += 1;
     }
 };
@@ -42,7 +42,7 @@ fn unreachableReply(_: Held, _: []const u8) Probe {
 fn rejectingSecondCall(data: []const u8) Probe {
     const callee = caller.callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
-    const kept = cdk.allocator.dupe(u8, data) catch return .reject("out of memory");
+    const kept = cdk.persistent.dupe(u8, data) catch return .reject("out of memory");
     return .commit(.{
         .onReply = unreachableReply,
         .onFinish = Held.deinit,
@@ -71,7 +71,7 @@ fn trappingReply(_: Held, _: []const u8) Probe {
 fn trappingSecondCall(data: []const u8) Probe {
     const callee = caller.callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
-    const kept = cdk.allocator.dupe(u8, data) catch return .reject("out of memory");
+    const kept = cdk.persistent.dupe(u8, data) catch return .reject("out of memory");
     return .commit(.{
         .onReply = trappingReply,
         .onFinish = Held.deinit,

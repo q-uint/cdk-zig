@@ -21,3 +21,15 @@ else if (is_wasm)
     if (profiling.enabled) profiling.counting_allocator else std.heap.wasm_allocator
 else
     std.heap.page_allocator;
+
+// Memory for one message: arguments, replies, call payloads. Freed when the
+// message ends, so nothing allocated here outlives it. An update's heap
+// persists, so without this every encoded reply would leak.
+var arena: std.heap.ArenaAllocator = .init(default);
+
+pub const scratch = arena.allocator();
+
+/// Called by the CDK once a message has replied and sent its calls.
+pub fn endMessage() void {
+    _ = arena.reset(.free_all);
+}
