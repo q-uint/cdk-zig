@@ -34,6 +34,8 @@ pub const assert = @import("assert.zig").assert;
 pub const RawCodec = @import("codec.zig").Raw;
 
 pub const CandidCodec = struct {
+    pub const empty = candid.empty_args;
+
     pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) ![]const u8 {
         return candid.encode(a, .{value});
     }
@@ -140,16 +142,6 @@ pub fn msgMethodName(a: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
 
 pub fn acceptMessage() void {
     ic0.accept_message();
-}
-
-// Message output, for entry points with no transition to state. Entry points
-// that make a call use the transition module's versions, which return one.
-pub fn replyRaw(msg: []const u8) void {
-    _ = transition.Transition(void).replyRaw(msg);
-}
-
-pub fn reject(msg: []const u8) void {
-    _ = transition.Transition(void).reject(msg);
 }
 
 // Cycles (message-level)

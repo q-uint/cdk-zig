@@ -88,7 +88,7 @@ and returns:
 | `T` | reply with `T` |
 | `E!T` | reply with `T`, or reject with the error's name |
 | `cdk.Transition(T)` | reply, reject with any message, or send a call |
-| `void` | reply by hand with `cdk.replyRaw`, or not at all |
+| `void` | reply with nothing, `()` in Candid |
 
 The reply is encoded after the handler returns, so it must not point into
 the handler's stack. Build it with the allocator instead, which the CDK frees

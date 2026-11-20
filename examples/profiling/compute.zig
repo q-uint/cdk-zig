@@ -17,8 +17,6 @@ fn compute() void {
     counter = acc;
     history.appendNTimes(cdk.persistent, acc, 256) catch cdk.trap("out of memory");
     cdk.profiling.exit("commit");
-
-    cdk.replyRaw("");
 }
 
 fn parseInput() u32 {

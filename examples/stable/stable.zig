@@ -11,11 +11,10 @@ fn grow(pages: u64) u64 {
     return cdk.stableGrow(pages);
 }
 
-fn write(arg: []const u8) void {
-    if (arg.len < 8) return cdk.reject("expected offset (u64) + payload");
+fn write(arg: []const u8) !void {
+    if (arg.len < 8) return error.ExpectedOffsetAndPayload;
     const offset = std.mem.readInt(u64, arg[0..8], .little);
     cdk.stableWrite(offset, arg[8..]);
-    cdk.replyRaw("");
 }
 
 fn read(scratch: std.mem.Allocator, arg: []const u8) ![]const u8 {
@@ -67,7 +66,6 @@ fn postUpgrade() void {
 
 fn increment() void {
     counter += 1;
-    cdk.replyRaw("");
 }
 
 fn getCounter() u32 {

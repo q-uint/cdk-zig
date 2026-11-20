@@ -26,11 +26,10 @@ fn init() void {
 }
 
 // The argument lasts only for this message, so the kept value is a copy.
-fn set(value: []const u8) void {
-    const kept = cdk.persistent.dupe(u8, value) catch return cdk.reject("out of memory");
+fn set(value: []const u8) !void {
+    const kept = try cdk.persistent.dupe(u8, value);
     cdk.persistent.free(stored_value);
     setTree(kept);
-    cdk.replyRaw("");
 }
 
 // Query that returns the stored value along with the data certificate.

@@ -7,6 +7,13 @@
 //!
 //! `a` is freed when the message ends, so neither needs to free anything. An
 //! argument that fails to decode rejects the message, naming the error.
+//!
+//! A handler returning `void` replies with `empty`, if the format declares
+//! it, and with no bytes otherwise:
+//!
+//!     pub const empty: []const u8
+//!
+//! Candid's is `()`, an empty argument list.
 
 const std = @import("std");
 const root = @import("root");
@@ -15,6 +22,11 @@ const root = @import("root");
 ///
 ///     pub const cdk_codec = cdk.CandidCodec;
 pub const default = if (@hasDecl(root, "cdk_codec")) root.cdk_codec else Raw;
+
+/// What `Codec` replies with when there is no value to reply with.
+pub fn empty(comptime Codec: type) []const u8 {
+    return if (@hasDecl(Codec, "empty")) Codec.empty else "";
+}
 
 /// Bytes as they are, and integers as little-endian bytes of their own size.
 pub const Raw = struct {

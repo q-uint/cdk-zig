@@ -266,10 +266,8 @@ pub fn setProfiling(arg: []const u8) RawReply {
 // effect does not depend on state the caller cannot see.
 pub fn toggleTracing() void {
     tracing_enabled = !tracing_enabled;
-    cdk.replyRaw("");
 }
 
 pub fn toggleEntry() void {
     entry_mode = !entry_mode;
-    cdk.replyRaw("");
 }

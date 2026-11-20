@@ -28,7 +28,6 @@ fn stopInterval() void {
         cdk.timers.cancelTimer(id);
         interval_id = null;
     }
-    cdk.replyRaw("");
 }
 
 comptime {

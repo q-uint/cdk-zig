@@ -106,6 +106,7 @@ pub fn TransitionWith(comptime ReplyCodec: type, comptime ReplyType: type) type 
 
         /// Reply in a format other than `Codec`.
         pub fn replyWith(comptime Other: type, value: Reply) Self {
+            if (comptime Reply == void) return replyRaw(codec.empty(Other));
             const bytes = Other.encode(memory.scratch, Reply, value) catch |err|
                 return reject(failure("could not encode the reply", err));
             return replyRaw(bytes);
@@ -463,8 +464,9 @@ fn Handlers(
 /// known at compile time.
 ///
 /// A handler that sends no call can return the value itself. Anything other
-/// than `void` or a `Transition` is encoded with `cdk_codec` and sent as the
-/// reply, the same as returning `.reply(value)`. Returned as an error union,
+/// than a `Transition` is encoded with `cdk_codec` and sent as the reply, the
+/// same as returning `.reply(value)`. `void` replies with the codec's empty
+/// reply, where the entry point can reply at all. Returned as an error union,
 /// an error rejects the message with the error's name. A `Transition` is only
 /// needed to send a call, or to reject with text other than an error name.
 ///
@@ -477,7 +479,7 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptim
 
     if (@typeInfo(Returns) == .error_union) {
         const Value = @typeInfo(Returns).error_union.payload;
-        if (Value == void or isTransition(Value))
+        if (isTransition(Value))
             @compileError("an entry point may return an error union only of a reply value, not " ++
                 @typeName(Returns));
     }
@@ -501,7 +503,7 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptim
             fn f() void {
                 beginMessage();
                 defer memory.endMessage();
-                checkOutcome(outcomeOf(func, Codec, .{}));
+                checkOutcome(outcomeOf(func, context, Codec, .{}));
             }
         }.f;
     }
@@ -528,17 +530,27 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptim
                 refuse(context, failure("could not decode the argument", err));
                 return;
             };
-            checkOutcome(outcomeOf(func, Codec, .{arg}));
+            checkOutcome(outcomeOf(func, context, Codec, .{arg}));
         }
     }.f;
 }
 
 // Null stands for an entry point returning void, which checkOutcome reads as
-// one that cannot state an outcome.
-fn outcomeOf(comptime func: anytype, comptime Codec: type, args: anytype) ?Outcome {
+// one that cannot state an outcome. Where the context allows a reply, void
+// replies with the codec's empty reply, unless the handler sent a call, which
+// checkOutcome traps on.
+fn outcomeOf(
+    comptime func: anytype,
+    comptime context: ic0.Context,
+    comptime Codec: type,
+    args: anytype,
+) ?Outcome {
     const Returns = @typeInfo(@TypeOf(func)).@"fn".return_type.?;
     if (comptime Returns == void) {
         invoke(func, args);
+        if (comptime ic0_spec.allows("msg_reply", context)) {
+            if (!call_performed) _ = TransitionWith(Codec, void).reply({});
+        }
         return null;
     }
     if (comptime isTransition(Returns)) return invoke(func, args).outcome;
