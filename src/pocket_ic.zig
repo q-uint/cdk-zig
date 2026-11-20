@@ -104,6 +104,11 @@ pub fn Canister(comptime Codec: type) type {
             return .{ .pic = self.pic, .id = self.id, .sender = self.sender };
         }
 
+        /// Profiling for this canister, when it is a profiling build.
+        pub fn profiler(self: Self) flamegraph.Profiler(Codec) {
+            return .{ .pic = self.pic, .id = self.id, .sender = self.sender };
+        }
+
         /// Pass `{}` as `arg` for a method that takes none.
         pub fn query(self: Self, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
             return self.expectReply(.query, T, method, arg);
@@ -437,6 +442,15 @@ pub const PocketIc = struct {
     /// A handle that speaks `Codec` to one canister, as the canister's own
     /// `cdk_codec` does.
     pub fn canister(self: *PocketIc, comptime Codec: type, id: principal.Principal) Canister(Codec) {
+        return .{ .pic = self, .id = id };
+    }
+
+    /// Profiling for a canister built with profiling on. Arguments to
+    /// `profile` use the Raw codec, `canister(Codec, id).profiler()` another.
+    pub fn profiler(
+        self: *PocketIc,
+        id: principal.Principal,
+    ) flamegraph.Profiler(cdk.RawCodec) {
         return .{ .pic = self, .id = id };
     }
 
@@ -1479,6 +1493,10 @@ fn base64Decode(allocator: Allocator, encoded: []const u8) ![]const u8 {
 }
 
 const testing = std.testing;
+
+test {
+    _ = flamegraph;
+}
 
 test "base64 round-trip" {
     const cases = [_][]const u8{ "", "\x04", "hello", &.{ 0, 1, 2, 3, 4, 5 } };

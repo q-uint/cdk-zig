@@ -430,36 +430,40 @@
 <text id="matched" x="1090.00" y="133" > </text>
 <g id="frames">
 <g >
-<title>process (5,138 samples, 56.46%)</title><rect x="523.8" y="69" width="666.2" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
-<text  x="526.83" y="79.5" >process</text>
+<title>process (88,864 samples, 88.91%)</title><rect x="140.8" y="69" width="1049.2" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="143.82" y="79.5" >process</text>
 </g>
 <g >
-<title>commit (261 samples, 2.87%)</title><rect x="456.1" y="69" width="33.9" height="15.0" fill="rgb(221,73,17)" rx="2" ry="2" />
-<text  x="459.15" y="79.5" >co..</text>
+<title>persist (80,557 samples, 80.60%)</title><rect x="207.7" y="53" width="951.1" height="15.0" fill="rgb(237,150,36)" rx="2" ry="2" />
+<text  x="210.69" y="63.5" >persist</text>
 </g>
 <g >
-<title>encode (261 samples, 2.87%)</title><rect x="1122.3" y="37" width="33.9" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
-<text  x="1125.32" y="47.5" >en..</text>
+<title>commit (4,609 samples, 4.61%)</title><rect x="83.0" y="69" width="54.4" height="15.0" fill="rgb(221,73,17)" rx="2" ry="2" />
+<text  x="85.99" y="79.5" >commit</text>
 </g>
 <g >
-<title>parse_input (261 samples, 2.87%)</title><rect x="490.0" y="69" width="33.8" height="15.0" fill="rgb(250,209,49)" rx="2" ry="2" />
-<text  x="492.99" y="79.5" >pa..</text>
-</g>
-<g >
-<title>transform (1,299 samples, 14.27%)</title><rect x="987.7" y="53" width="168.5" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
-<text  x="990.74" y="63.5" >transform</text>
-</g>
-<g >
-<title>all (9,101 samples, 100%)</title><rect x="10.0" y="101" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<title>all (99,944 samples, 100%)</title><rect x="10.0" y="101" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
 <text  x="13.00" y="111.5" ></text>
 </g>
 <g >
-<title>compute (9,101 samples, 100.00%)</title><rect x="10.0" y="85" width="1180.0" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
-<text  x="13.00" y="95.5" >compute</text>
+<title>parse_input (289 samples, 0.29%)</title><rect x="137.4" y="69" width="3.4" height="15.0" fill="rgb(250,209,49)" rx="2" ry="2" />
+<text  x="140.41" y="79.5" ></text>
 </g>
 <g >
-<title>validate (261 samples, 2.87%)</title><rect x="1156.2" y="53" width="33.8" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
-<text  x="1159.16" y="63.5" >va..</text>
+<title>transform (2,354 samples, 2.36%)</title><rect x="1158.8" y="53" width="27.8" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="1161.80" y="63.5" >t..</text>
+</g>
+<g >
+<title>validate (289 samples, 0.29%)</title><rect x="1186.6" y="53" width="3.4" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="1189.59" y="63.5" ></text>
+</g>
+<g >
+<title>encode (279 samples, 0.28%)</title><rect x="1183.3" y="37" width="3.3" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="1186.29" y="47.5" ></text>
+</g>
+<g >
+<title>compute (99,944 samples, 100.00%)</title><rect x="10.0" y="85" width="1180.0" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="13.00" y="95.5" >compute</text>
 </g>
 </g>
 </svg>

@@ -1,6 +1,11 @@
 // Compile-time opt-in profiling module for flamegraph / cycle cost analysis.
 //
-// Enable by declaring in your root source file:
+// Enable it from build.zig, which builds `{name}_profiling.wasm` next to the
+// plain canister:
+//
+//     _ = cdk.addCanister(b, dep, "app", .{ .profiling = true });
+//
+// or by declaring in your root source file:
 //
 //     pub const cdk_profiling = true;
 //
@@ -21,8 +26,15 @@ const std = @import("std");
 const root = @import("root");
 const cdk = @import("cdk.zig");
 const alloc = @import("allocator.zig").default;
+const build_options = @import("cdk_build_options");
 
-pub const enabled = @hasDecl(root, "cdk_profiling") and root.cdk_profiling;
+pub const enabled = build_options.profiling or
+    (@hasDecl(root, "cdk_profiling") and root.cdk_profiling);
+
+/// With profiling on, every query is exported a second time as an update
+/// named `__profile_<name>`. Queries roll back their state, the trace
+/// included, so only the update leaves a trace to fetch.
+pub const query_prefix = "__profile_";
 
 // Counting allocator that wraps the default WASM allocator and tracks
 // the number of live heap bytes. Use as cdk_allocator to get per-function
@@ -85,10 +97,35 @@ const entry_size = @sizeOf(TraceEntry);
 const page_size: usize = 2 * 1024 * 1024;
 const entries_per_page = page_size / entry_size;
 
+// The trace's own memory bypasses the counting allocator, so heap_bytes
+// measures the canister rather than the profiler.
+const trace_allocator = std.heap.wasm_allocator;
+
 var entries: std.ArrayListUnmanaged(TraceEntry) = .empty;
 var name_map: std.AutoArrayHashMapUnmanaged(i32, []const u8) = .{};
 var tracing_enabled: bool = false;
 var entry_mode: bool = false;
+
+// Entries the buffer holds, and names the table takes, before either has to
+// grow inside a frame.
+const reserved_entries = 4096;
+const reserved_names = 64;
+const os_page_size = 4096;
+
+// Runs before an entry point's first counter read. Growing the buffer, and
+// the first write to each of its pages in a message, cost instructions that
+// would otherwise land in whichever frame is open.
+fn reserve() void {
+    if (!tracing_enabled) return;
+    name_map.ensureUnusedCapacity(trace_allocator, reserved_names) catch {};
+    entries.ensureUnusedCapacity(trace_allocator, reserved_entries) catch return;
+    const spare = std.mem.sliceAsBytes(entries.unusedCapacitySlice());
+    var offset: usize = 0;
+    while (offset < spare.len) : (offset += os_page_size) {
+        const byte: *volatile u8 = &spare[offset];
+        byte.* = 0;
+    }
+}
 
 fn heapMetric() i64 {
     if (has_counting_allocator) return heap_bytes;
@@ -97,7 +134,7 @@ fn heapMetric() i64 {
 
 fn appendEntry(func_id: i32) void {
     if (!tracing_enabled) return;
-    entries.append(alloc, .{
+    entries.append(trace_allocator, .{
         .func_id = func_id,
         .instructions = @intCast(cdk.instructionCounter()),
         .heap_bytes = heapMetric(),
@@ -106,7 +143,7 @@ fn appendEntry(func_id: i32) void {
 }
 
 fn registerName(id: i32, name: []const u8) void {
-    name_map.put(alloc, id, name) catch return;
+    name_map.put(trace_allocator, id, name) catch return;
 }
 
 fn comptimeId(comptime name: []const u8) i32 {
@@ -130,6 +167,7 @@ pub fn traced(comptime func: fn () void, comptime name: []const u8) fn () void {
             if (entry_mode) {
                 entries.clearRetainingCapacity();
             }
+            reserve();
             appendEntry(id);
             func();
             appendEntry(-id);
@@ -137,7 +175,32 @@ pub fn traced(comptime func: fn () void, comptime name: []const u8) fn () void {
     }.f;
 }
 
-// Manual instrumentation for sub-function granularity.
+/// A traced section, from `section` to its `end`. Ending it with `defer`
+/// closes it on every path out, an early `try` return included:
+///
+///     const s = cdk.profiling.section("tree.append");
+///     defer s.end();
+pub const Section = if (enabled) struct {
+    id: i32,
+
+    pub fn end(self: Section) void {
+        appendEntry(-self.id);
+    }
+} else struct {
+    pub fn end(_: Section) void {}
+};
+
+pub fn section(comptime name: []const u8) Section {
+    if (comptime !enabled) {
+        return .{};
+    } else {
+        enter(name);
+        return .{ .id = comptime comptimeId(name) };
+    }
+}
+
+// Manual instrumentation for sub-function granularity. Prefer `section`,
+// since an `exit` skipped by an early return leaves its frame open.
 pub fn enter(comptime name: []const u8) void {
     if (!enabled) return;
     const id = comptime comptimeId(name);
@@ -155,7 +218,7 @@ pub fn exit(comptime name: []const u8) void {
 
 // The endpoints below are exported with the Raw codec, see export.zig.
 
-pub fn getCycles() i64 {
+pub fn getInstructions() i64 {
     return @intCast(cdk.instructionCounter());
 }
 
@@ -184,6 +247,23 @@ pub fn getProfilingNames(scratch: std.mem.Allocator) ![]const u8 {
     return out.items;
 }
 
+const RawReply = cdk.TransitionWith(cdk.RawCodec, void);
+
+// Argument: two bytes, tracing then entry_mode, each 0 or 1. Turning tracing
+// on starts a fresh trace, so a test sees only what it ran after.
+pub fn setProfiling(arg: []const u8) RawReply {
+    if (arg.len != 2 or arg[0] > 1 or arg[1] > 1)
+        return .reject(
+            "__set_profiling takes two bytes, tracing and entry_mode, each 0 or 1",
+        );
+    tracing_enabled = arg[0] == 1;
+    entry_mode = arg[1] == 1;
+    if (tracing_enabled) entries.clearRetainingCapacity();
+    return .replyRaw("");
+}
+
+// The toggles match ic-wasm's endpoints. Prefer __set_profiling, whose
+// effect does not depend on state the caller cannot see.
 pub fn toggleTracing() void {
     tracing_enabled = !tracing_enabled;
     cdk.replyRaw("");

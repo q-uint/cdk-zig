@@ -1,8 +1,8 @@
+const std = @import("std");
 const cdk = @import("cdk");
 
-pub const cdk_profiling = true;
-
 var counter: u32 = 0;
+var history: std.ArrayList(u32) = .empty;
 
 fn init() void {
     counter = 0;
@@ -15,14 +15,15 @@ fn compute() void {
     // Manual profiling example: instrument a small inline section.
     cdk.profiling.enter("commit");
     counter = acc;
+    history.appendNTimes(cdk.persistent, acc, 256) catch cdk.trap("out of memory");
     cdk.profiling.exit("commit");
 
     cdk.replyRaw("");
 }
 
 fn parseInput() u32 {
-    cdk.profiling.enter("parse_input");
-    defer cdk.profiling.exit("parse_input");
+    const s = cdk.profiling.section("parse_input");
+    defer s.end();
 
     var acc: u32 = 0;
     for (0..500) |i| {
@@ -32,8 +33,8 @@ fn parseInput() u32 {
 }
 
 fn process(input: u32) u32 {
-    cdk.profiling.enter("process");
-    defer cdk.profiling.exit("process");
+    const s = cdk.profiling.section("process");
+    defer s.end();
 
     var acc = input;
     acc = validate(acc);
@@ -43,8 +44,8 @@ fn process(input: u32) u32 {
 }
 
 fn validate(acc: u32) u32 {
-    cdk.profiling.enter("validate");
-    defer cdk.profiling.exit("validate");
+    const s = cdk.profiling.section("validate");
+    defer s.end();
 
     var result = acc;
     for (0..300) |i| {
@@ -54,8 +55,8 @@ fn validate(acc: u32) u32 {
 }
 
 fn transform(acc: u32) u32 {
-    cdk.profiling.enter("transform");
-    defer cdk.profiling.exit("transform");
+    const s = cdk.profiling.section("transform");
+    defer s.end();
 
     var result = acc;
     for (0..1000) |i| {
@@ -73,8 +74,8 @@ fn transform(acc: u32) u32 {
 }
 
 fn persist(acc: u32) u32 {
-    cdk.profiling.enter("persist");
-    defer cdk.profiling.exit("persist");
+    const s = cdk.profiling.section("persist");
+    defer s.end();
 
     // Grow stable memory and write data to exercise stable memory tracking.
     _ = cdk.stableGrow(2);
@@ -89,11 +90,27 @@ fn persist(acc: u32) u32 {
 }
 
 fn getCounter() u32 {
+    const s = cdk.profiling.section("read_counter");
+    defer s.end();
     return counter;
+}
+
+// Fails when `fail` is nonzero. Its section still closes, since `end` is
+// deferred.
+fn check(fail: u8) !u32 {
+    const s = cdk.profiling.section("verify");
+    defer s.end();
+    try mayFail(fail != 0);
+    return counter;
+}
+
+fn mayFail(fail: bool) !void {
+    if (fail) return error.CheckFailed;
 }
 
 comptime {
     cdk.init(init);
     cdk.update(compute, "compute");
+    cdk.update(check, "check");
     cdk.query(getCounter, "get_counter");
 }

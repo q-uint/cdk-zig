@@ -22,6 +22,14 @@ pub fn update(comptime func: anytype, name: []const u8) void {
 /// A query whose argument and reply use `Codec` rather than `cdk_codec`.
 pub fn queryWith(comptime Codec: type, comptime func: anytype, name: []const u8) void {
     @export(&callConvWrapper(profiling.traced(transition.entryPoint(func, .RQ, Codec), name)), .{ .name = "canister_query " ++ name });
+    // A query's trace is rolled back with the rest of its state, so profiling
+    // builds export it again as an update that keeps it.
+    if (profiling.enabled) {
+        const traced = profiling.traced(transition.entryPoint(func, .U, Codec), name);
+        @export(&callConvWrapper(traced), .{
+            .name = "canister_update " ++ profiling.query_prefix ++ name,
+        });
+    }
 }
 
 /// An update whose argument and reply use `Codec` rather than `cdk_codec`.
@@ -65,9 +73,10 @@ fn rawUpdate(comptime func: anytype, comptime name: []const u8) void {
 
 comptime {
     if (profiling.enabled) {
-        rawQuery(profiling.getCycles, "__get_cycles");
+        rawQuery(profiling.getInstructions, "__get_instructions");
         rawQuery(profiling.getProfiling, "__get_profiling");
         rawQuery(profiling.getProfilingNames, "__get_profiling_names");
+        rawUpdate(profiling.setProfiling, "__set_profiling");
         rawUpdate(profiling.toggleTracing, "__toggle_tracing");
         rawUpdate(profiling.toggleEntry, "__toggle_entry");
     }

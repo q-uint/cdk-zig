@@ -9,142 +9,221 @@ fn initPic() !pic.PocketIc {
     return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
 }
 
-fn readWasm(name: []const u8) ![]const u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, name, allocator, .limited(10 * 1024 * 1024));
-}
-
-fn callUpdate(pocket: *pic.PocketIc, cid: cdk.principal.Principal, method: []const u8) !void {
-    const result = try pocket.updateCall(cid, cdk.principal.anonymous, method, "");
-    switch (result) {
-        .reply => |data| allocator.free(data),
-        .reject => |rej| {
-            defer rej.deinit(allocator);
-            std.debug.print("rejected: {s}\n", .{rej.message});
-            return error.Rejected;
-        },
-    }
-}
-
-fn deployAndTrace(pocket: *pic.PocketIc, wasm: []const u8) !cdk.principal.Principal {
+fn deploy(pocket: *pic.PocketIc, path: []const u8) !cdk.principal.Principal {
+    const wasm = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        path,
+        allocator,
+        .limited(10 * 1024 * 1024),
+    );
+    defer allocator.free(wasm);
     const cid = try pocket.createCanister();
     try pocket.installCode(cid, wasm, "", .install);
-    try callUpdate(pocket, cid, "__toggle_tracing");
-    try callUpdate(pocket, cid, "compute");
     return cid;
 }
 
-test "profiling trace produces folded stacks" {
-    const wasm = try readWasm("zig-out/bin/profiling.wasm");
-    defer allocator.free(wasm);
+fn deployProfiling(pocket: *pic.PocketIc) !cdk.principal.Principal {
+    return deploy(pocket, "zig-out/bin/compute_profiling.wasm");
+}
 
+fn raw(pocket: *pic.PocketIc, cid: cdk.principal.Principal) pic.Canister(cdk.RawCodec) {
+    return pocket.canister(cdk.RawCodec, cid);
+}
+
+// One profiled call of `compute`.
+fn profileCompute(pocket: *pic.PocketIc, metric: pic.flamegraph.Metric) !pic.flamegraph.Trace {
+    const cid = try deployProfiling(pocket);
+    return pocket.profiler(cid).profile(allocator, "compute", {}, metric);
+}
+
+fn hasFrame(trace: *const pic.flamegraph.Trace, name: []const u8) bool {
+    for (trace.lines.items) |line| {
+        if (std.mem.indexOf(u8, line.stack, name) != null) return true;
+    }
+    return false;
+}
+
+test "profiling trace produces folded stacks" {
     var pocket = try initPic();
     defer pocket.deinit();
 
-    const cid = try deployAndTrace(&pocket, wasm);
-
-    // Fetch instruction flamegraph.
-    var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .instructions);
+    var trace = try profileCompute(&pocket, .instructions);
     defer trace.deinit();
 
     try std.testing.expect(trace.lines.items.len > 0);
     try std.testing.expect(trace.total_cost > 0);
-
-    var found_compute = false;
-    for (trace.lines.items) |line| {
-        if (std.mem.indexOf(u8, line.stack, "compute") != null) {
-            found_compute = true;
-            break;
-        }
-    }
-    try std.testing.expect(found_compute);
+    try std.testing.expect(hasFrame(&trace, "compute"));
+    try std.testing.expectEqual(@as(usize, 0), trace.unbalanced);
 
     try trace.writeFoldedStacks(std.testing.io, "profile.folded");
 }
 
-test "stable memory flamegraph tracks page growth" {
-    const wasm = try readWasm("zig-out/bin/profiling.wasm");
-    defer allocator.free(wasm);
-
+test "inclusive and exclusive costs" {
     var pocket = try initPic();
     defer pocket.deinit();
 
-    const cid = try deployAndTrace(&pocket, wasm);
-
-    var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .stable_pages);
+    var trace = try profileCompute(&pocket, .instructions);
     defer trace.deinit();
 
-    // The persist function grows stable memory, so we should see cost > 0.
-    try std.testing.expect(trace.total_cost > 0);
+    // process calls validate, transform and persist, so its inclusive cost
+    // covers theirs and its exclusive cost does not.
+    const process = trace.inclusive("process");
+    const callees = trace.inclusive("validate") +
+        trace.inclusive("transform") +
+        trace.inclusive("persist");
+    try std.testing.expect(callees > 0);
+    try std.testing.expectEqual(process, trace.exclusive("process") + callees);
 
-    var found_persist = false;
-    for (trace.lines.items) |line| {
-        if (std.mem.indexOf(u8, line.stack, "persist") != null) {
-            found_persist = true;
-            break;
-        }
-    }
-    try std.testing.expect(found_persist);
+    // The entry point's frame covers the whole call.
+    try std.testing.expectEqual(trace.total_cost, trace.inclusive("compute"));
+    try std.testing.expectEqual(@as(i64, 0), trace.inclusive("no_such_frame"));
+}
+
+test "stable memory flamegraph tracks page growth" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+
+    var trace = try profileCompute(&pocket, .stable_pages);
+    defer trace.deinit();
+
+    // persist grows stable memory by three pages.
+    try std.testing.expectEqual(@as(i64, 3), trace.inclusive("persist"));
+    try std.testing.expect(hasFrame(&trace, "persist"));
 
     try trace.writeFoldedStacks(std.testing.io, "stable.folded");
 }
 
 test "heap memory flamegraph" {
-    const wasm = try readWasm("zig-out/bin/profiling.wasm");
-    defer allocator.free(wasm);
-
     var pocket = try initPic();
     defer pocket.deinit();
 
-    const cid = try deployAndTrace(&pocket, wasm);
-
-    var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .heap_bytes);
+    var trace = try profileCompute(&pocket, .heap_bytes);
     defer trace.deinit();
+
+    try std.testing.expect(trace.inclusive("commit") >= 256 * @sizeOf(u32));
 
     try trace.writeFoldedStacks(std.testing.io, "heap.folded");
 }
 
-test "__get_cycles returns instruction count" {
-    const wasm = try readWasm("zig-out/bin/profiling.wasm");
-    defer allocator.free(wasm);
-
+test "a query is profiled through its update twin" {
     var pocket = try initPic();
     defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
 
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
+    const profiler = pocket.profiler(cid);
+    var trace = try profiler.profileQuery(allocator, "get_counter", {}, .instructions);
+    defer trace.deinit();
 
-    const result = try pocket.queryCall(cid, cdk.principal.anonymous, "__get_cycles", "");
-    switch (result) {
-        .reply => |data| {
-            defer allocator.free(data);
-            try std.testing.expectEqual(@as(usize, 8), data.len);
-            const cycles = std.mem.readInt(i64, data[0..8], .little);
-            try std.testing.expect(cycles > 0);
-        },
-        .reject => |rej| {
-            defer rej.deinit(allocator);
-            return error.Rejected;
-        },
+    try std.testing.expect(trace.inclusive("get_counter") > 0);
+    try std.testing.expect(trace.inclusive("read_counter") > 0);
+    try std.testing.expect(hasFrame(&trace, "get_counter;read_counter"));
+}
+
+test "a section closes on an early error return" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
+
+    const profiler = pocket.profiler(cid);
+    try profiler.start(.{});
+    const reject = try raw(&pocket, cid).expectReject(.update, "check", @as(u8, 1));
+    defer reject.deinit();
+
+    var trace = try profiler.trace(allocator, .instructions);
+    defer trace.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), trace.unbalanced);
+    try std.testing.expect(hasFrame(&trace, "check;verify"));
+}
+
+test "last_call_only keeps one call" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
+
+    const profiler = pocket.profiler(cid);
+    const canister = raw(&pocket, cid);
+
+    try profiler.start(.{});
+    (try canister.update([]const u8, "compute", {})).deinit();
+    (try canister.update([]const u8, "compute", {})).deinit();
+    var both = try profiler.trace(allocator, .instructions);
+    defer both.deinit();
+
+    try profiler.start(.{ .last_call_only = true });
+    (try canister.update([]const u8, "compute", {})).deinit();
+    (try canister.update([]const u8, "compute", {})).deinit();
+    var last = try profiler.trace(allocator, .instructions);
+    defer last.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), countLines(&both, "compute;parse_input"));
+    try std.testing.expectEqual(@as(usize, 1), countLines(&last, "compute;parse_input"));
+}
+
+fn countLines(trace: *const pic.flamegraph.Trace, stack: []const u8) usize {
+    var count: usize = 0;
+    for (trace.lines.items) |line| {
+        if (std.mem.eql(u8, line.stack, stack)) count += 1;
     }
+    return count;
+}
+
+test "stop leaves later calls out of the trace" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
+
+    const profiler = pocket.profiler(cid);
+    try profiler.start(.{});
+    try profiler.stop();
+    (try raw(&pocket, cid).update([]const u8, "compute", {})).deinit();
+
+    var trace = try profiler.trace(allocator, .instructions);
+    defer trace.deinit();
+    try std.testing.expectEqual(@as(usize, 0), trace.lines.items.len);
+}
+
+test "__set_profiling rejects a malformed argument" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
+
+    const reject = try raw(&pocket, cid).expectReject(.update, "__set_profiling", "\x02\x00");
+    defer reject.deinit();
+}
+
+test "__get_instructions returns the instruction counter" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
+
+    const count = try raw(&pocket, cid).query(i64, "__get_instructions", {});
+    defer count.deinit();
+    try std.testing.expect(count.value > 0);
 }
 
 test "tracing disabled by default produces empty trace" {
-    const wasm = try readWasm("zig-out/bin/profiling.wasm");
-    defer allocator.free(wasm);
-
     var pocket = try initPic();
     defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
 
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
+    (try raw(&pocket, cid).update([]const u8, "compute", {})).deinit();
 
-    // Call compute without enabling tracing.
-    try callUpdate(&pocket, cid, "compute");
-
-    // Trace should be empty.
-    var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .instructions);
+    var trace = try pocket.profiler(cid).trace(allocator, .instructions);
     defer trace.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), trace.lines.items.len);
     try std.testing.expectEqual(@as(i64, 0), trace.total_cost);
+}
+
+test "the plain build exports no profiling endpoints" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deploy(&pocket, "zig-out/bin/compute.wasm");
+
+    const canister = raw(&pocket, cid);
+    const reject = try canister.expectReject(.update, "__set_profiling", "\x01\x00");
+    defer reject.deinit();
+    const twin = try canister.expectReject(.update, "__profile_get_counter", {});
+    defer twin.deinit();
 }

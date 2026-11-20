@@ -43,17 +43,38 @@ pub const FoldedLine = struct {
     cost: i64,
 };
 
+const Costs = std.StringArrayHashMapUnmanaged(i64);
+
 pub const Trace = struct {
     allocator: Allocator,
     lines: std.ArrayListUnmanaged(FoldedLine),
     names: std.AutoArrayHashMapUnmanaged(i32, []const u8),
     total_cost: i64,
+    inclusive_costs: Costs,
+    exclusive_costs: Costs,
+    /// Frames closed by an enclosing frame's exit rather than their own, an
+    /// `exit` skipped by an early return say. Each was charged up to that
+    /// enclosing exit.
+    unbalanced: usize,
+
+    /// The cost of every frame named `name`, its callees included. Recursive
+    /// frames count once.
+    pub fn inclusive(self: *const Trace, name: []const u8) i64 {
+        return self.inclusive_costs.get(name) orelse 0;
+    }
+
+    /// The cost of every frame named `name`, its callees excluded.
+    pub fn exclusive(self: *const Trace, name: []const u8) i64 {
+        return self.exclusive_costs.get(name) orelse 0;
+    }
 
     pub fn deinit(self: *Trace) void {
         for (self.lines.items) |line| {
             self.allocator.free(line.stack);
         }
         self.lines.deinit(self.allocator);
+        self.inclusive_costs.deinit(self.allocator);
+        self.exclusive_costs.deinit(self.allocator);
         for (self.names.values()) |name| {
             self.allocator.free(name);
         }
@@ -180,63 +201,262 @@ fn buildFoldedStacks(
     names: std.AutoArrayHashMapUnmanaged(i32, []const u8),
     metric: Metric,
 ) !Trace {
-    var lines: std.ArrayListUnmanaged(FoldedLine) = .empty;
-    errdefer {
-        for (lines.items) |line| allocator.free(line.stack);
-        lines.deinit(allocator);
-    }
-
-    var stack: [256]StackFrame = undefined;
-    var depth: usize = 0;
-    var total_cost: i64 = 0;
+    var folder: Folder = .{ .allocator = allocator };
+    errdefer folder.deinit();
 
     for (entries) |entry| {
         if (entry.func_id > 0) {
             // Function entry.
-            if (depth >= 256) continue;
-            const name = names.get(entry.func_id) orelse "unknown";
-            stack[depth] = .{
+            if (folder.depth >= max_depth) continue;
+            folder.stack[folder.depth] = .{
                 .id = entry.func_id,
-                .name = name,
+                .name = names.get(entry.func_id) orelse "unknown",
                 .enter_value = entryValue(entry, metric),
                 .children_cost = 0,
             };
-            depth += 1;
+            folder.depth += 1;
         } else if (entry.func_id < 0) {
-            // Function exit.
-            if (depth == 0) continue;
-            const abs_id = -entry.func_id;
-            // Find matching frame (should be top of stack).
-            if (stack[depth - 1].id != abs_id) continue;
-            depth -= 1;
-            const frame = stack[depth];
+            // Function exit. Frames above the matching one never saw their
+            // own exit, so they close here too. An exit with no matching
+            // frame is dropped.
+            const id = -entry.func_id;
+            const target = for (0..folder.depth) |i| {
+                const index = folder.depth - 1 - i;
+                if (folder.stack[index].id == id) break index;
+            } else continue;
             const exit_value = entryValue(entry, metric);
-            const self_cost = exit_value - frame.enter_value - frame.children_cost;
-
-            if (self_cost > 0) {
-                // Build the stack string: "parent;child;grandchild"
-                var path: std.ArrayListUnmanaged(u8) = .empty;
-                defer path.deinit(allocator);
-                for (0..depth + 1) |i| {
-                    if (i > 0) try path.append(allocator, ';');
-                    try path.appendSlice(allocator, stack[i].name);
-                }
-                const owned = try allocator.dupe(u8, path.items);
-                try lines.append(allocator, .{ .stack = owned, .cost = self_cost });
-                total_cost += self_cost;
+            while (folder.depth > target + 1) {
+                try folder.close(exit_value);
+                folder.unbalanced += 1;
             }
-
-            // Propagate cost to parent.
-            if (depth > 0) {
-                stack[depth - 1].children_cost += exit_value - frame.enter_value;
-            }
+            try folder.close(exit_value);
         }
     }
 
     return .{
         .allocator = allocator,
-        .lines = lines,
+        .lines = folder.lines,
         .names = names,
-        .total_cost = total_cost,
+        .total_cost = folder.total_cost,
+        .inclusive_costs = folder.inclusive_costs,
+        .exclusive_costs = folder.exclusive_costs,
+        .unbalanced = folder.unbalanced,
     };
+}
+
+const max_depth = 256;
+
+const Folder = struct {
+    allocator: Allocator,
+    stack: [max_depth]StackFrame = undefined,
+    depth: usize = 0,
+    lines: std.ArrayListUnmanaged(FoldedLine) = .empty,
+    total_cost: i64 = 0,
+    inclusive_costs: Costs = .empty,
+    exclusive_costs: Costs = .empty,
+    unbalanced: usize = 0,
+
+    fn deinit(self: *Folder) void {
+        for (self.lines.items) |line| self.allocator.free(line.stack);
+        self.lines.deinit(self.allocator);
+        self.inclusive_costs.deinit(self.allocator);
+        self.exclusive_costs.deinit(self.allocator);
+    }
+
+    // Closes the top frame at `exit_value`.
+    fn close(self: *Folder, exit_value: i64) !void {
+        self.depth -= 1;
+        const frame = self.stack[self.depth];
+        const cost = exit_value - frame.enter_value;
+        const self_cost = cost - frame.children_cost;
+
+        try add(self.allocator, &self.exclusive_costs, frame.name, self_cost);
+        const recursive = for (self.stack[0..self.depth]) |outer| {
+            if (outer.id == frame.id) break true;
+        } else false;
+        if (!recursive) try add(self.allocator, &self.inclusive_costs, frame.name, cost);
+
+        if (self_cost > 0) {
+            // Build the stack string: "parent;child;grandchild"
+            var path: std.ArrayListUnmanaged(u8) = .empty;
+            defer path.deinit(self.allocator);
+            for (self.stack[0 .. self.depth + 1], 0..) |f, i| {
+                if (i > 0) try path.append(self.allocator, ';');
+                try path.appendSlice(self.allocator, f.name);
+            }
+            const owned = try self.allocator.dupe(u8, path.items);
+            errdefer self.allocator.free(owned);
+            try self.lines.append(self.allocator, .{ .stack = owned, .cost = self_cost });
+            self.total_cost += self_cost;
+        }
+
+        // Propagate cost to parent.
+        if (self.depth > 0) self.stack[self.depth - 1].children_cost += cost;
+    }
+
+    fn add(allocator: Allocator, costs: *Costs, name: []const u8, cost: i64) !void {
+        const slot = try costs.getOrPut(allocator, name);
+        if (!slot.found_existing) slot.value_ptr.* = 0;
+        slot.value_ptr.* += cost;
+    }
+};
+
+/// Drives a profiling build of a canister from a test. Arguments are encoded
+/// with `Codec`, as `Canister(Codec)` does.
+pub fn Profiler(comptime Codec: type) type {
+    return struct {
+        pic: *pic.PocketIc,
+        id: cdk.principal.Principal,
+        sender: cdk.principal.Principal = cdk.principal.anonymous,
+
+        const Self = @This();
+
+        pub const Options = struct {
+            /// Keep only the trace of the latest traced call.
+            last_call_only: bool = false,
+        };
+
+        /// Starts a fresh trace.
+        pub fn start(self: Self, options: Options) !void {
+            try self.set(true, options.last_call_only);
+        }
+
+        pub fn stop(self: Self) !void {
+            try self.set(false, false);
+        }
+
+        /// The trace recorded so far.
+        pub fn trace(self: Self, allocator: Allocator, metric: Metric) !Trace {
+            return fetch(allocator, self.pic, self.id, metric);
+        }
+
+        /// Runs one update and returns its trace. Tracing stays on, last
+        /// call only. Pass `{}` as `arg` for a method that takes none.
+        pub fn profile(
+            self: Self,
+            allocator: Allocator,
+            method: []const u8,
+            arg: anytype,
+            metric: Metric,
+        ) !Trace {
+            try self.start(.{ .last_call_only = true });
+            try self.call(method, arg);
+            return self.trace(allocator, metric);
+        }
+
+        /// `profile` for a query, through its `__profile_<name>` update.
+        pub fn profileQuery(
+            self: Self,
+            allocator: Allocator,
+            method: []const u8,
+            arg: anytype,
+            metric: Metric,
+        ) !Trace {
+            const update = try std.mem.concat(
+                self.pic.allocator,
+                u8,
+                &.{ cdk.profiling.query_prefix, method },
+            );
+            defer self.pic.allocator.free(update);
+            return self.profile(allocator, update, arg, metric);
+        }
+
+        fn set(self: Self, tracing: bool, entry_mode: bool) !void {
+            const settings = [2]u8{ @intFromBool(tracing), @intFromBool(entry_mode) };
+            const result = try self.pic.updateCall(
+                self.id,
+                self.sender,
+                "__set_profiling",
+                &settings,
+            );
+            try expectReply(self.pic, "__set_profiling", result);
+        }
+
+        fn call(self: Self, method: []const u8, arg: anytype) !void {
+            var scratch = std.heap.ArenaAllocator.init(self.pic.allocator);
+            defer scratch.deinit();
+            const payload = if (@TypeOf(arg) == void)
+                ""
+            else
+                try Codec.encode(scratch.allocator(), @TypeOf(arg), arg);
+            const result = try self.pic.updateCall(self.id, self.sender, method, payload);
+            try expectReply(self.pic, method, result);
+        }
+    };
+}
+
+fn expectReply(pocket: *pic.PocketIc, method: []const u8, result: pic.WasmResult) !void {
+    switch (result) {
+        .reply => |data| pocket.allocator.free(data),
+        .reject => |rej| {
+            defer rej.deinit(pocket.allocator);
+            std.log.debug("{s} was rejected ({t}): {s}", .{ method, rej.code, rej.message });
+            return error.Rejected;
+        },
+    }
+}
+
+const testing = std.testing;
+
+const Names = std.AutoArrayHashMapUnmanaged(i32, []const u8);
+
+fn testNames(pairs: []const struct { i32, []const u8 }) !Names {
+    const a = testing.allocator;
+    var names: Names = .{};
+    errdefer {
+        for (names.values()) |n| a.free(n);
+        names.deinit(a);
+    }
+    for (pairs) |pair| try names.put(a, pair[0], try a.dupe(u8, pair[1]));
+    return names;
+}
+
+fn testTrace(entries: []const TraceEntry, names: []const struct { i32, []const u8 }) !Trace {
+    return buildFoldedStacks(testing.allocator, entries, try testNames(names), .instructions);
+}
+
+fn at(id: i32, instructions: i64) TraceEntry {
+    return .{
+        .func_id = id,
+        .instructions = instructions,
+        .heap_bytes = 0,
+        .stable_pages = 0,
+    };
+}
+
+test "inclusive and exclusive costs" {
+    // a [0, 100) calls b [10, 40) and b [50, 60).
+    const entries = [_]TraceEntry{
+        at(1, 0), at(2, 10), at(-2, 40), at(2, 50), at(-2, 60), at(-1, 100),
+    };
+    var trace = try testTrace(&entries, &.{ .{ 1, "a" }, .{ 2, "b" } });
+    defer trace.deinit();
+
+    try testing.expectEqual(@as(i64, 100), trace.inclusive("a"));
+    try testing.expectEqual(@as(i64, 60), trace.exclusive("a"));
+    try testing.expectEqual(@as(i64, 40), trace.inclusive("b"));
+    try testing.expectEqual(@as(i64, 40), trace.exclusive("b"));
+    try testing.expectEqual(@as(i64, 100), trace.total_cost);
+    try testing.expectEqual(@as(usize, 0), trace.unbalanced);
+}
+
+test "recursive frames count once inclusively" {
+    const entries = [_]TraceEntry{ at(1, 0), at(1, 10), at(-1, 30), at(-1, 50) };
+    var trace = try testTrace(&entries, &.{.{ 1, "a" }});
+    defer trace.deinit();
+
+    try testing.expectEqual(@as(i64, 50), trace.inclusive("a"));
+    try testing.expectEqual(@as(i64, 50), trace.exclusive("a"));
+}
+
+test "an enclosing exit closes a frame missing its own" {
+    // b never exits, so a's exit closes it.
+    const entries = [_]TraceEntry{ at(1, 0), at(2, 10), at(-1, 40) };
+    var trace = try testTrace(&entries, &.{ .{ 1, "a" }, .{ 2, "b" } });
+    defer trace.deinit();
+
+    try testing.expectEqual(@as(usize, 1), trace.unbalanced);
+    try testing.expectEqual(@as(i64, 40), trace.inclusive("a"));
+    try testing.expectEqual(@as(i64, 30), trace.inclusive("b"));
+    try testing.expectEqual(@as(usize, 2), trace.lines.items.len);
 }

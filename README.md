@@ -260,18 +260,21 @@ Supported: `bool`, integers, floats, `[]const u8` (text), optionals, slices
 ### Profiling
 
 ```zig
-pub const cdk_profiling = true;
+_ = cdk.addCanister(b, dep, "app", .{ .profiling = true });
 ```
 
-Instruments every entry point and exposes endpoints for trace data, for
-flamegraphs of instructions, heap and stable memory. Free when disabled. See
+Also builds `app_profiling.wasm`, which traces every entry point and exposes
+endpoints for trace data. Tests drive it with `pocket.profiler(cid)`, read
+costs with `inclusive` and `exclusive`, and render flamegraphs of
+instructions, heap and stable memory. Free when disabled. See
 [examples/profiling](examples/profiling/).
 
 ## Build helpers
 
 - `addCanister(b, dep, name, options)` builds `{name}.zig` to
-  `wasm32-freestanding`, or wasm64 with `.{ .wasm64 = true }`. Returns the
-  `*Compile` step.
+  `wasm32-freestanding`, or wasm64 with `.{ .wasm64 = true }`. With
+  `.{ .profiling = true }` it also builds `{name}_profiling.wasm`. Returns
+  the plain canister's `*Compile` step.
 - `addTests(b, dep)` adds a `test` step running `test.zig` against PocketIC.
   Returns the `*Run` step. `pocket.canister(Codec, id)` gives typed calls, see
   [examples/json](examples/json/test.zig).

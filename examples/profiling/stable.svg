@@ -430,20 +430,20 @@
 <text id="matched" x="1090.00" y="117" > </text>
 <g id="frames">
 <g >
-<title>persist (3 samples, 100.00%)</title><rect x="10.0" y="37" width="1180.0" height="15.0" fill="rgb(237,150,36)" rx="2" ry="2" />
-<text  x="13.00" y="47.5" >persist</text>
-</g>
-<g >
 <title>compute (3 samples, 100.00%)</title><rect x="10.0" y="69" width="1180.0" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
 <text  x="13.00" y="79.5" >compute</text>
+</g>
+<g >
+<title>all (3 samples, 100%)</title><rect x="10.0" y="85" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="95.5" ></text>
 </g>
 <g >
 <title>process (3 samples, 100.00%)</title><rect x="10.0" y="53" width="1180.0" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
 <text  x="13.00" y="63.5" >process</text>
 </g>
 <g >
-<title>all (3 samples, 100%)</title><rect x="10.0" y="85" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
-<text  x="13.00" y="95.5" ></text>
+<title>persist (3 samples, 100.00%)</title><rect x="10.0" y="37" width="1180.0" height="15.0" fill="rgb(237,150,36)" rx="2" ry="2" />
+<text  x="13.00" y="47.5" >persist</text>
 </g>
 </g>
 </svg>

@@ -3,21 +3,51 @@ const std = @import("std");
 pub const CanisterOptions = struct {
     wasm64: bool = false,
     root_source_file: ?[]const u8 = null,
+    /// Also build `{name}_profiling.wasm`, the same canister with profiling
+    /// on.
+    profiling: bool = false,
 };
 
+/// Returns the plain canister's `*Compile`, also with `.profiling`.
 pub fn addCanister(
     b: *std.Build,
     dep: *std.Build.Dependency,
     name: []const u8,
     options: CanisterOptions,
 ) *std.Build.Step.Compile {
-    const cdk_mod = dep.module("cdk");
+    const source = options.root_source_file orelse b.fmt("{s}.zig", .{name});
+    const exe = addWasm(b, dep.module("cdk"), name, source, options.wasm64);
+    if (options.profiling) {
+        // The cdk module is shared, so the profiling build gets its own copy
+        // reading a different cdk_build_options.
+        const cdk_mod = b.createModule(.{
+            .root_source_file = dep.path("src/cdk.zig"),
+            .imports = &.{.{ .name = "cdk_build_options", .module = buildOptions(b, true) }},
+        });
+        _ = addWasm(b, cdk_mod, b.fmt("{s}_profiling", .{name}), source, options.wasm64);
+    }
+    return exe;
+}
+
+fn buildOptions(b: *std.Build, profiling: bool) *std.Build.Module {
+    const options = b.addOptions();
+    options.addOption(bool, "profiling", profiling);
+    return options.createModule();
+}
+
+fn addWasm(
+    b: *std.Build,
+    cdk_mod: *std.Build.Module,
+    name: []const u8,
+    source: []const u8,
+    wasm64: bool,
+) *std.Build.Step.Compile {
     const target = b.resolveTargetQuery(.{
-        .cpu_arch = if (options.wasm64) .wasm64 else .wasm32,
+        .cpu_arch = if (wasm64) .wasm64 else .wasm32,
         .os_tag = .freestanding,
     });
     const root_mod = b.createModule(.{
-        .root_source_file = b.path(options.root_source_file orelse b.fmt("{s}.zig", .{name})),
+        .root_source_file = b.path(source),
         .target = target,
         .optimize = .ReleaseSmall,
         .imports = &.{.{ .name = "cdk", .module = cdk_mod }},
@@ -64,8 +94,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const default_options = buildOptions(b, false);
     const cdk_mod = b.addModule("cdk", .{
         .root_source_file = b.path("src/cdk.zig"),
+        .imports = &.{.{ .name = "cdk_build_options", .module = default_options }},
     });
 
     const blst_dep_lib = b.dependency("blst", .{});
@@ -97,6 +129,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(file),
             .target = target,
             .optimize = optimize,
+            // Any file reaching allocator.zig reaches profiling.zig.
+            .imports = &.{.{ .name = "cdk_build_options", .module = default_options }},
         });
         if (std.mem.eql(u8, file, "src/pocket_ic.zig")) {
             mod.addImport("cdk", cdk_mod);

@@ -1,6 +1,6 @@
 <?xml version="1.0" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg version="1.1" width="1200" height="134" onload="init(evt)" viewBox="0 0 1200 134" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<svg version="1.1" width="1200" height="118" onload="init(evt)" viewBox="0 0 1200 118" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 <!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
 <!-- NOTES:  -->
 <defs>
@@ -421,33 +421,25 @@
 	}
 ]]>
 </script>
-<rect x="0.0" y="0" width="1200.0" height="134.0" fill="url(#background)"  />
+<rect x="0.0" y="0" width="1200.0" height="118.0" fill="url(#background)"  />
 <text id="title" x="600.00" y="24" >Flame Graph</text>
-<text id="details" x="10.00" y="117" > </text>
+<text id="details" x="10.00" y="101" > </text>
 <text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
 <text id="search" x="1090.00" y="24" >Search</text>
 <text id="ignorecase" x="1174.00" y="24" >ic</text>
-<text id="matched" x="1090.00" y="117" > </text>
+<text id="matched" x="1090.00" y="101" > </text>
 <g id="frames">
 <g >
-<title>process (1 samples, 33.33%)</title><rect x="796.7" y="53" width="393.3" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
-<text  x="799.67" y="63.5" >process</text>
+<title>compute (1,600 samples, 100.00%)</title><rect x="10.0" y="53" width="1180.0" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="13.00" y="63.5" >compute</text>
 </g>
 <g >
-<title>parse_input (1 samples, 33.33%)</title><rect x="403.3" y="53" width="393.4" height="15.0" fill="rgb(250,209,49)" rx="2" ry="2" />
-<text  x="406.33" y="63.5" >parse_input</text>
+<title>all (1,600 samples, 100%)</title><rect x="10.0" y="69" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="79.5" ></text>
 </g>
 <g >
-<title>compute (3 samples, 100.00%)</title><rect x="10.0" y="69" width="1180.0" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
-<text  x="13.00" y="79.5" >compute</text>
-</g>
-<g >
-<title>validate (1 samples, 33.33%)</title><rect x="796.7" y="37" width="393.3" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
-<text  x="799.67" y="47.5" >validate</text>
-</g>
-<g >
-<title>all (3 samples, 100%)</title><rect x="10.0" y="85" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
-<text  x="13.00" y="95.5" ></text>
+<title>commit (1,600 samples, 100.00%)</title><rect x="10.0" y="37" width="1180.0" height="15.0" fill="rgb(221,73,17)" rx="2" ry="2" />
+<text  x="13.00" y="47.5" >commit</text>
 </g>
 </g>
 </svg>

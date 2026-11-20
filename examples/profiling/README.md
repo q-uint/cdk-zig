@@ -1,62 +1,94 @@
 # Profiling Example
 
-Demonstrates the CDK's built-in profiling support for measuring instruction
-costs, heap memory growth, stable memory growth, and generating flamegraphs.
+Measures instruction costs, heap growth and stable memory growth, and renders
+them as flamegraphs.
 
 ## How it works
 
-Set `pub const cdk_profiling = true;` in your canister source. The CDK
-automatically instruments all exported entry points (`init`, `query`,
-`update`, etc.) and exposes profiling endpoints:
-
-| Endpoint               | Type   | Description                          |
-|------------------------|--------|--------------------------------------|
-| `__get_cycles`         | query  | Current instruction counter          |
-| `__get_profiling`      | query  | Paginated trace data                 |
-| `__get_profiling_names`| query  | Function ID to name mapping          |
-| `__toggle_tracing`     | update | Enable/disable trace recording       |
-| `__toggle_entry`       | update | Clear trace buffer on each call      |
-
-No manual wrapping is needed. When `cdk_profiling` is absent or `false`,
-there is zero overhead -- the instrumentation is eliminated at comptime.
-
-Each trace entry records three metrics at every function entry/exit point:
-
-- **Instructions** -- CPU instruction count via `performance_counter`
-- **Heap pages** -- WASM linear memory size via `memory.size`
-- **Stable pages** -- IC stable memory size via `stable64_size`
-
-## Generating flamegraphs
-
-In your PocketIC test, fetch the trace and select a metric:
+Ask for a profiling build in `build.zig`:
 
 ```zig
-const pic = @import("pocket-ic");
-
-// ... deploy canister, enable tracing, call methods ...
-
-// Instruction cost flamegraph
-var trace = try pic.flamegraph.fetch(allocator, &pocket, cid, .instructions);
-defer trace.deinit();
-try trace.writeFoldedStacks("profile.folded");
-
-// Stable memory growth flamegraph
-var stable = try pic.flamegraph.fetch(allocator, &pocket, cid, .stable_pages);
-defer stable.deinit();
-try stable.writeFoldedStacks("stable.folded");
-
-// Heap memory growth flamegraph
-var heap = try pic.flamegraph.fetch(allocator, &pocket, cid, .heap_pages);
-defer heap.deinit();
-try heap.writeFoldedStacks("heap.folded");
+_ = cdk.addCanister(b, dep, "compute", .{ .profiling = true });
 ```
 
-Then render the SVGs:
+This builds `compute.wasm` as usual and `compute_profiling.wasm` next to it.
+Setting `pub const cdk_profiling = true;` in the root source file does the
+same for a single build.
+
+A profiling build traces every entry point and exports:
+
+| Endpoint                 | Type   | Description                                |
+|--------------------------|--------|--------------------------------------------|
+| `__get_instructions`     | query  | Current instruction counter                |
+| `__get_profiling`        | query  | Paginated trace data                       |
+| `__get_profiling_names`  | query  | Function ID to name mapping                |
+| `__set_profiling`        | update | Tracing and last-call-only, set explicitly |
+| `__toggle_tracing`       | update | Flip trace recording                       |
+| `__toggle_entry`         | update | Flip clearing the trace on each call       |
+| `__profile_<query>`      | update | Each query again, as an update             |
+
+A query's trace is rolled back with the rest of its state, so each query is
+also exported as an update that keeps it.
+
+Each trace entry records three metrics:
+
+- **Instructions**, from `performance_counter`
+- **Heap bytes**, live allocations of the CDK allocator
+- **Stable pages**, from `stable64_size`
+
+The replica charges 5,000 instructions the first time a message reads an
+OS page of heap or stable memory, and 5,000 more the first time it writes
+one. These charges land in whichever frame touches the page first, often
+the entry point. The profiler pays for its own pages before the entry
+point's frame opens.
+
+## Sections
+
+```zig
+fn append(item: Item) !void {
+    const s = cdk.profiling.section("tree.append");
+    defer s.end();
+    try validate(item);
+    // ...
+}
+```
+
+`defer` ends the section on every path out, an early `try` return included.
+`enter` and `exit` remain for inline spans.
+
+## Measuring from a test
+
+```zig
+const profiler = pocket.profiler(cid);
+
+// One call, one trace.
+var trace = try profiler.profile(allocator, "compute", {}, .instructions);
+defer trace.deinit();
+
+const total = trace.inclusive("process"); // callees included
+const own = trace.exclusive("process"); // callees excluded
+
+// A query, through its __profile_ twin.
+var q = try profiler.profileQuery(allocator, "get_counter", {}, .instructions);
+defer q.deinit();
+```
+
+For several calls, `start(.{})`, make the calls, then
+`trace(allocator, metric)`. `.last_call_only = true` keeps only the latest.
+`stop()` turns tracing off.
+`pocket.canister(Codec, cid).profiler()` encodes arguments with `Codec`.
+
+`trace.unbalanced` counts frames closed by an enclosing exit rather than their
+own.
+
+## Flamegraphs
+
+```zig
+try trace.writeFoldedStacks(io, "profile.folded");
+```
 
 ```
 flamegraph.pl profile.folded > profile.svg
-flamegraph.pl stable.folded > stable.svg
-flamegraph.pl heap.folded > heap.svg
 ```
 
 ## Running the example
@@ -79,21 +111,3 @@ Stable memory:
 Heap memory:
 
 ![Heap memory](heap.svg)
-
-## Manual instrumentation
-
-For sub-function granularity, use `enter` / `exit`:
-
-```zig
-fn myFunction() void {
-    cdk.profiling.enter("my_function");
-    defer cdk.profiling.exit("my_function");
-
-    // ... work ...
-
-    // Inline sections work too:
-    cdk.profiling.enter("subsection");
-    // ... more work ...
-    cdk.profiling.exit("subsection");
-}
-```
