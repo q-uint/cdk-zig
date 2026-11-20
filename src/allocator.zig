@@ -22,6 +22,18 @@ else if (is_wasm)
 else
     std.heap.page_allocator;
 
+const options = if (@hasDecl(root, "cdk_options")) root.cdk_options else struct {};
+
+/// How many bytes of scratch a message keeps for the next one. The arena
+/// folds its buffers into one at the end of a message, so the next message's
+/// argument, work and reply share one contiguous buffer instead of landing in
+/// separate heap regions. A message needing more spills into fresh buffers,
+/// which the next reset folds back in, up to this limit.
+pub const scratch_retain: usize = if (@hasDecl(options, "scratch_retain"))
+    options.scratch_retain
+else
+    64 * 1024;
+
 // Memory for one message: arguments, replies, call payloads. Freed when the
 // message ends, so nothing allocated here outlives it. An update's heap
 // persists, so without this every encoded reply would leak.
@@ -31,5 +43,5 @@ pub const scratch = arena.allocator();
 
 /// Called by the CDK once a message has replied and sent its calls.
 pub fn endMessage() void {
-    _ = arena.reset(.free_all);
+    _ = arena.reset(.{ .retain_with_limit = scratch_retain });
 }
