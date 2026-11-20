@@ -1,6 +1,7 @@
 pub const memory = @import("memory.zig");
 pub const allocator = @import("allocator.zig");
 pub const log = @import("log.zig");
+pub const layout = @import("layout.zig");
 
 pub const StableMemoryError = memory.StableMemoryError;
 pub const wasm_page_size = memory.wasm_page_size;
@@ -20,4 +21,5 @@ pub const Reader = memory.Reader;
 test {
     _ = allocator;
     _ = log;
+    _ = layout;
 }

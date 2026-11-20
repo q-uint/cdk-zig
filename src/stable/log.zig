@@ -1,21 +1,22 @@
 const std = @import("std");
 const memory = @import("memory.zig");
 const sa = @import("allocator.zig");
-
-const wasm_page_size = memory.wasm_page_size;
+const layout = @import("layout.zig");
 
 /// An append-only list of entries in stable memory.
 ///
-/// When `entry_size` is `null`, entries are variable-length blobs.
-/// Each blob is individually allocated and an index array provides
-/// O(1) random access. The index doubles in capacity when full.
+/// Entries live in segments. Segment `c` holds `base_len << c` entries, is
+/// allocated when its first entry is appended, and never moves. Appending
+/// never copies, and entry `i` is found with bit arithmetic.
 ///
-/// When `entry_size` is set, entries are fixed-length and stored
-/// contiguously with no index overhead. The data region doubles
-/// when full.
+/// When `entry_size` is set, entries are fixed-length and stored in the
+/// segments. When it is `null`, entries are blobs and the segments index
+/// them. Blobs are bump-allocated from chunks, since a log never frees.
 ///
 /// All state lives in stable memory and survives canister upgrades.
 pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
+    if (entry_size) |n| if (n == 0) @compileError("entry_size must not be 0");
+
     const Alloc = sa.Allocator(Memory);
     const is_fixed = entry_size != null;
     const fixed_len = entry_size orelse 0;
@@ -27,24 +28,22 @@ pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
         const Self = @This();
 
         pub const header_size: u64 = @sizeOf(Header);
-        const initial_capacity: u64 = 64;
 
-        // Variable: each index slot is 16 bytes (offset + len).
-        // Fixed: each data slot is fixed_len bytes.
+        const base_len: u64 = 64;
+        const max_segments = 64;
+        // A blob this large or larger gets an allocation of its own.
+        const chunk_size: u64 = memory.wasm_page_size;
+
         const slot_size: u64 = if (is_fixed) fixed_len else @sizeOf(IndexEntry);
 
-        const magic_value: u64 = if (is_fixed)
-            0x5354_4142_4C4F_4701 // STABLOG\1 (fixed)
-        else
-            0x5354_4142_4C4F_4700; // STABLOG\0 (variable)
-
         const Header = extern struct {
-            magic_val: u64,
+            magic: u64,
             count: u64,
-            region_offset: u64,
-            region_capacity: u64,
-            _reserved1: u64,
-            _reserved2: u64,
+            // The free span of the current blob chunk.
+            chunk_next: u64,
+            chunk_end: u64,
+            // 0 until allocated.
+            segments: [max_segments]u64,
         };
 
         const IndexEntry = extern struct {
@@ -52,42 +51,23 @@ pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
             len: u64,
         };
 
-        /// Initialize a log with its header at `base`.
-        /// `alloc` is used for data and (in variable mode) index allocations.
-        /// `base` must not overlap with `alloc`'s managed region.
-        pub fn init(alloc: Alloc, base: u64) memory.StableMemoryError!Self {
-            var self = Self{ .alloc = alloc, .base = base };
+        const magic = layout.fingerprint(
+            "stable.Log",
+            1,
+            &.{ Header, IndexEntry },
+            std.fmt.comptimePrint("entry_size={?d},base_len={d}", .{ entry_size, base_len }),
+        );
 
-            const cap = Memory.size() * wasm_page_size;
-            if (cap >= base + header_size) {
-                var buf: [8]u8 = undefined;
-                Memory.read(base, &buf);
-                if (std.mem.readInt(u64, &buf, .little) == magic_value) {
-                    return self;
-                }
-            }
+        /// Open the log whose header is at `base`, or create one there.
+        /// `alloc` provides segments and blobs. `base` must not overlap with
+        /// `alloc`'s managed region.
+        pub fn init(alloc: Alloc, base: u64) layout.Error!Self {
+            const self = Self{ .alloc = alloc, .base = base };
+            if (try layout.open(Memory, base, magic, header_size)) return self;
 
-            const required_pages = std.math.divCeil(
-                u64,
-                base + header_size,
-                wasm_page_size,
-            ) catch unreachable;
-            const current_pages = Memory.size();
-            if (required_pages > current_pages) {
-                _ = try Memory.grow(required_pages - current_pages);
-            }
-
-            const region_offset = try self.alloc.alloc(initial_capacity * slot_size);
-
-            self.writeHeader(.{
-                .magic_val = magic_value,
-                .count = 0,
-                .region_offset = region_offset,
-                .region_capacity = initial_capacity,
-                ._reserved1 = 0,
-                ._reserved2 = 0,
-            });
-
+            var hdr = std.mem.zeroes(Header);
+            hdr.magic = magic;
+            layout.store(Memory, Header, base, hdr);
             return self;
         }
 
@@ -99,31 +79,18 @@ pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
             self: *Self,
             data: if (is_fixed) *const [fixed_len]u8 else []const u8,
         ) memory.StableMemoryError!u64 {
-            var hdr = self.readHeader();
-
-            if (hdr.count >= hdr.region_capacity) {
-                try self.growRegion(&hdr);
-            }
-
-            const idx = hdr.count;
+            const idx = self.load("count");
+            const at = try self.claimSlot(idx);
 
             if (is_fixed) {
-                if (fixed_len > 0) {
-                    Memory.write(hdr.region_offset + idx * fixed_len, data);
-                }
+                Memory.write(at, data);
             } else {
-                const data_offset = try self.alloc.alloc(data.len);
-                if (data.len > 0) {
-                    Memory.write(data_offset, data);
-                }
-                writeIndexEntry(hdr.region_offset, idx, .{
-                    .offset = data_offset,
-                    .len = data.len,
-                });
+                const offset = try self.reserve(data.len);
+                if (data.len > 0) Memory.write(offset, data);
+                layout.store(Memory, IndexEntry, at, .{ .offset = offset, .len = data.len });
             }
 
-            hdr.count = idx + 1;
-            self.writeHeader(hdr);
+            self.store("count", idx + 1);
             return idx;
         }
 
@@ -139,19 +106,16 @@ pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
             index: u64,
             buf: if (is_fixed) *[fixed_len]u8 else []u8,
         ) if (is_fixed) bool else ?[]const u8 {
-            const hdr = self.readHeader();
-
-            if (index >= hdr.count) {
+            if (index >= self.len()) {
                 return if (is_fixed) false else null;
             }
 
+            const at = self.slotAt(index);
             if (is_fixed) {
-                if (fixed_len > 0) {
-                    Memory.read(hdr.region_offset + index * fixed_len, buf);
-                }
+                Memory.read(at, buf);
                 return true;
             } else {
-                const ie = readIndexEntry(hdr.region_offset, index);
+                const ie = layout.load(Memory, IndexEntry, at);
                 if (ie.len == 0) return buf[0..0];
                 if (buf.len < ie.len) return null;
                 const n: usize = @intCast(ie.len);
@@ -160,79 +124,95 @@ pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
             }
         }
 
+        /// Read consecutive entries from `start` into `buf`, with one read
+        /// per segment they span. Returns the entries read, fewer than `buf`
+        /// holds when the log ends first.
+        pub fn getRange(self: Self, start: u64, buf: [][fixed_len]u8) [][fixed_len]u8 {
+            if (!is_fixed) @compileError("getRange needs a fixed entry_size");
+
+            const count = self.len();
+            if (start >= count) return buf[0..0];
+            const n: usize = @intCast(@min(@as(u64, buf.len), count - start));
+
+            var done: usize = 0;
+            while (done < n) {
+                const loc = locate(start + done);
+                const room = (base_len << loc.segment) - loc.index;
+                const take: usize = @intCast(@min(room, @as(u64, n - done)));
+                Memory.read(
+                    self.slotAt(start + done),
+                    std.mem.sliceAsBytes(buf[done..][0..take]),
+                );
+                done += take;
+            }
+            return buf[0..n];
+        }
+
         /// Returns the byte length of the entry at `index`,
         /// or null if the index is out of range.
         pub fn entrySize(self: Self, index: u64) ?u64 {
-            const hdr = self.readHeader();
-            if (index >= hdr.count) return null;
+            if (index >= self.len()) return null;
             if (is_fixed) return fixed_len;
-            return readIndexEntry(hdr.region_offset, index).len;
+            return layout.load(Memory, IndexEntry, self.slotAt(index)).len;
         }
 
         /// Returns the number of entries in the log.
         pub fn len(self: Self) u64 {
-            return self.readHeader().count;
+            return self.load("count");
         }
 
-        fn growRegion(self: *Self, hdr: *Header) memory.StableMemoryError!void {
-            const new_cap = hdr.region_capacity * 2;
-            const new_region = try self.alloc.alloc(new_cap * slot_size);
+        const Slot = struct { segment: u6, index: u64 };
 
-            const copy_bytes = hdr.count * slot_size;
-            var copied: u64 = 0;
-            while (copied < copy_bytes) {
-                var buf: [512]u8 = undefined;
-                const chunk: usize = @intCast(@min(512, copy_bytes - copied));
-                Memory.read(hdr.region_offset + copied, buf[0..chunk]);
-                Memory.write(new_region + copied, buf[0..chunk]);
-                copied += chunk;
+        fn locate(i: u64) Slot {
+            const c = std.math.log2_int(u64, i / base_len + 1);
+            return .{ .segment = c, .index = i - base_len * ((@as(u64, 1) << c) - 1) };
+        }
+
+        fn slotAt(self: Self, i: u64) u64 {
+            const loc = locate(i);
+            return layout.load(Memory, u64, self.segmentField(loc.segment)) + loc.index * slot_size;
+        }
+
+        // Like slotAt, but allocates the segment on its first entry.
+        fn claimSlot(self: *Self, i: u64) memory.StableMemoryError!u64 {
+            const loc = locate(i);
+            const field = self.segmentField(loc.segment);
+            var segment = layout.load(Memory, u64, field);
+            if (segment == 0) {
+                const bytes = std.math.mul(u64, base_len << loc.segment, slot_size) catch
+                    return error.OutOfMemory;
+                segment = try self.alloc.alloc(bytes);
+                layout.store(Memory, u64, field, segment);
+            }
+            return segment + loc.index * slot_size;
+        }
+
+        fn reserve(self: *Self, n: u64) memory.StableMemoryError!u64 {
+            if (n == 0) return 0;
+            if (n >= chunk_size) return self.alloc.alloc(n);
+
+            const next = self.load("chunk_next");
+            if (n <= self.load("chunk_end") - next) {
+                self.store("chunk_next", next + n);
+                return next;
             }
 
-            self.alloc.free(hdr.region_offset);
-            hdr.region_offset = new_region;
-            hdr.region_capacity = new_cap;
+            const chunk = try self.alloc.alloc(chunk_size);
+            self.store("chunk_next", chunk + n);
+            self.store("chunk_end", chunk + chunk_size);
+            return chunk;
         }
 
-        fn readHeader(self: Self) Header {
-            var buf: [header_size]u8 = undefined;
-            Memory.read(self.base, &buf);
-            return .{
-                .magic_val = std.mem.readInt(u64, buf[0..8], .little),
-                .count = std.mem.readInt(u64, buf[8..16], .little),
-                .region_offset = std.mem.readInt(u64, buf[16..24], .little),
-                .region_capacity = std.mem.readInt(u64, buf[24..32], .little),
-                ._reserved1 = std.mem.readInt(u64, buf[32..40], .little),
-                ._reserved2 = std.mem.readInt(u64, buf[40..48], .little),
-            };
+        fn segmentField(self: Self, c: u6) u64 {
+            return self.base + @offsetOf(Header, "segments") + @as(u64, c) * 8;
         }
 
-        fn writeHeader(self: Self, hdr: Header) void {
-            var buf: [header_size]u8 = undefined;
-            std.mem.writeInt(u64, buf[0..8], hdr.magic_val, .little);
-            std.mem.writeInt(u64, buf[8..16], hdr.count, .little);
-            std.mem.writeInt(u64, buf[16..24], hdr.region_offset, .little);
-            std.mem.writeInt(u64, buf[24..32], hdr.region_capacity, .little);
-            std.mem.writeInt(u64, buf[32..40], hdr._reserved1, .little);
-            std.mem.writeInt(u64, buf[40..48], hdr._reserved2, .little);
-            Memory.write(self.base, &buf);
+        fn load(self: Self, comptime field: []const u8) u64 {
+            return layout.load(Memory, u64, self.base + @offsetOf(Header, field));
         }
 
-        fn readIndexEntry(region_base: u64, idx: u64) IndexEntry {
-            const sz = @sizeOf(IndexEntry);
-            var buf: [sz]u8 = undefined;
-            Memory.read(region_base + idx * sz, &buf);
-            return .{
-                .offset = std.mem.readInt(u64, buf[0..8], .little),
-                .len = std.mem.readInt(u64, buf[8..16], .little),
-            };
-        }
-
-        fn writeIndexEntry(region_base: u64, idx: u64, ie: IndexEntry) void {
-            const sz = @sizeOf(IndexEntry);
-            var buf: [sz]u8 = undefined;
-            std.mem.writeInt(u64, buf[0..8], ie.offset, .little);
-            std.mem.writeInt(u64, buf[8..16], ie.len, .little);
-            Memory.write(region_base + idx * sz, &buf);
+        fn store(self: Self, comptime field: []const u8, value: u64) void {
+            layout.store(Memory, u64, self.base + @offsetOf(Header, field), value);
         }
     };
 }
@@ -244,6 +224,9 @@ const testing_memory = @import("testing.zig");
 const TestAlloc = sa.Allocator(testing_memory);
 const VarLog = Log(testing_memory, null);
 const FixedLog32 = Log(testing_memory, 32);
+const FixedLog64 = Log(testing_memory, 64);
+// Each entry holds its own index, so reads can check they got the right one.
+const IndexLog = Log(testing_memory, 8);
 
 fn initVar() !struct { alloc: TestAlloc, log: VarLog } {
     testing_memory.reset();
@@ -257,6 +240,22 @@ fn initFixed() !struct { alloc: TestAlloc, log: FixedLog32 } {
     const alloc = try TestAlloc.init(FixedLog32.header_size);
     const log = try FixedLog32.init(alloc, 0);
     return .{ .alloc = alloc, .log = log };
+}
+
+fn initIndexLog(n: u64) !IndexLog {
+    testing_memory.reset();
+    var log = try IndexLog.init(try TestAlloc.init(IndexLog.header_size), 0);
+    var i: u64 = 0;
+    while (i < n) : (i += 1) _ = try log.append(&std.mem.toBytes(i));
+    return log;
+}
+
+test "locate" {
+    try std.testing.expectEqual(FixedLog32.Slot{ .segment = 0, .index = 0 }, FixedLog32.locate(0));
+    try std.testing.expectEqual(FixedLog32.Slot{ .segment = 0, .index = 63 }, FixedLog32.locate(63));
+    try std.testing.expectEqual(FixedLog32.Slot{ .segment = 1, .index = 0 }, FixedLog32.locate(64));
+    try std.testing.expectEqual(FixedLog32.Slot{ .segment = 1, .index = 127 }, FixedLog32.locate(191));
+    try std.testing.expectEqual(FixedLog32.Slot{ .segment = 2, .index = 0 }, FixedLog32.locate(192));
 }
 
 test "var: append and get" {
@@ -326,7 +325,7 @@ test "var: init is idempotent" {
     try std.testing.expectEqualStrings("persist", log2.get(0, &buf).?);
 }
 
-test "var: index grows beyond initial capacity" {
+test "var: index grows beyond the first segment" {
     var s = try initVar();
 
     var idx: u64 = 0;
@@ -339,6 +338,31 @@ test "var: index grows beyond initial capacity" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("entry", s.log.get(0, &buf).?);
     try std.testing.expectEqualStrings("entry", s.log.get(79, &buf).?);
+}
+
+test "var: small blobs are packed into one chunk" {
+    var s = try initVar();
+
+    _ = try s.log.append("hello");
+    _ = try s.log.append("world");
+
+    const first = layout.load(testing_memory, VarLog.IndexEntry, s.log.slotAt(0));
+    const second = layout.load(testing_memory, VarLog.IndexEntry, s.log.slotAt(1));
+    try std.testing.expectEqual(first.offset + 5, second.offset);
+}
+
+test "var: a blob larger than a chunk" {
+    var s = try initVar();
+
+    _ = try s.log.append("before");
+    const big: [VarLog.chunk_size + 1]u8 = @splat('b');
+    _ = try s.log.append(&big);
+    _ = try s.log.append("after");
+
+    var buf: [VarLog.chunk_size + 1]u8 = undefined;
+    try std.testing.expectEqualStrings("before", s.log.get(0, &buf).?);
+    try std.testing.expectEqualSlices(u8, &big, s.log.get(1, &buf).?);
+    try std.testing.expectEqualStrings("after", s.log.get(2, &buf).?);
 }
 
 test "var: many variable-size entries" {
@@ -419,23 +443,41 @@ test "fixed: init is idempotent" {
     try std.testing.expectEqualSlices(u8, &entry, &buf);
 }
 
-test "fixed: data region grows beyond initial capacity" {
-    var s = try initFixed();
+test "fixed: segments never move" {
+    var log = try initIndexLog(1);
+    const first = log.slotAt(0);
 
-    var idx: u64 = 0;
-    while (idx < 80) : (idx += 1) {
-        var entry: [32]u8 = undefined;
-        @memset(&entry, @intCast(idx & 0xFF));
-        try std.testing.expectEqual(idx, try s.log.append(&entry));
+    var i: u64 = 1;
+    while (i < 300) : (i += 1) _ = try log.append(&std.mem.toBytes(i));
+
+    try std.testing.expectEqual(first, log.slotAt(0));
+    i = 0;
+    while (i < 300) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        try std.testing.expect(log.get(i, &buf));
+        try std.testing.expectEqual(i, std.mem.bytesToValue(u64, &buf));
     }
+}
 
-    try std.testing.expectEqual(@as(u64, 80), s.log.len());
+test "fixed: getRange spans segments" {
+    const log = try initIndexLog(300);
 
-    var buf: [32]u8 = undefined;
+    // 50..250 crosses from segment 0 through 1 into 2.
+    var buf: [200][8]u8 = undefined;
+    const got = log.getRange(50, &buf);
+    try std.testing.expectEqual(@as(usize, 200), got.len);
+    for (got, 50..) |entry, i| try std.testing.expectEqual(@as(u64, i), std.mem.bytesToValue(u64, &entry));
 
-    try std.testing.expect(s.log.get(0, &buf));
-    for (buf) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    // Clipped at the end of the log.
+    try std.testing.expectEqual(@as(usize, 10), log.getRange(290, &buf).len);
+    try std.testing.expectEqual(@as(usize, 0), log.getRange(300, &buf).len);
+}
 
-    try std.testing.expect(s.log.get(79, &buf));
-    for (buf) |b| try std.testing.expectEqual(@as(u8, 79), b);
+test "init refuses another layout" {
+    var s = try initFixed();
+    const entry: [32]u8 = @splat(1);
+    _ = try s.log.append(&entry);
+
+    try std.testing.expectError(error.LayoutMismatch, FixedLog64.init(s.alloc, 0));
+    try std.testing.expectError(error.LayoutMismatch, VarLog.init(s.alloc, 0));
 }

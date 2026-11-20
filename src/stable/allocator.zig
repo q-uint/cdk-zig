@@ -1,5 +1,6 @@
 const std = @import("std");
 const memory = @import("memory.zig");
+const layout = @import("layout.zig");
 
 const wasm_page_size = memory.wasm_page_size;
 
@@ -25,7 +26,12 @@ pub fn Allocator(comptime Memory: type) type {
         pub const global_header_size: u64 = @sizeOf(GlobalHeader);
         pub const block_header_size: u64 = @sizeOf(BlockHeader);
 
-        const magic_value: u64 = 0x5354_4142_414C_4C43; // STABALLC
+        const magic_value = layout.fingerprint(
+            "stable.Allocator",
+            1,
+            &.{ GlobalHeader, BlockHeader },
+            std.fmt.comptimePrint("min_align={d}", .{min_align}),
+        );
 
         const GlobalHeader = extern struct {
             magic_val: u64,
@@ -41,31 +47,14 @@ pub fn Allocator(comptime Memory: type) type {
 
         /// Initialize an allocator rooted at `base` in stable memory.
         ///
-        /// If the region was previously initialized (magic present),
-        /// restores the existing state. Otherwise writes a fresh header.
-        pub fn init(base: u64) memory.StableMemoryError!Self {
+        /// Restores the allocator at `base`, or writes a fresh header if the
+        /// memory there is unused. Fails with `LayoutMismatch` on anything
+        /// else, rather than overwrite it.
+        pub fn init(base: u64) layout.Error!Self {
             const self = Self{ .base = base };
+            if (try layout.open(Memory, base, magic_value, global_header_size)) return self;
 
-            const capacity = Memory.size() * wasm_page_size;
-            if (capacity >= base + global_header_size) {
-                var buf: [8]u8 = undefined;
-                Memory.read(base, &buf);
-                if (std.mem.readInt(u64, &buf, .little) == magic_value) {
-                    return self;
-                }
-            }
-
-            const required_pages = std.math.divCeil(
-                u64,
-                base + global_header_size,
-                wasm_page_size,
-            ) catch unreachable;
-            const current_pages = Memory.size();
-            if (required_pages > current_pages) {
-                _ = try Memory.grow(required_pages - current_pages);
-            }
-
-            self.writeGlobalHeader(.{
+            layout.store(Memory, GlobalHeader, self.base, .{
                 .magic_val = magic_value,
                 .next_offset = base + global_header_size,
                 .free_list_head = 0,
@@ -81,23 +70,23 @@ pub fn Allocator(comptime Memory: type) type {
             if (len == 0) return 0;
 
             const padded = std.mem.alignForward(u64, len, min_align);
-            var gh = self.readGlobalHeader();
+            var gh = layout.load(Memory, GlobalHeader, self.base);
 
             // First-fit search through the free list.
             var prev: u64 = 0;
             var cur = gh.free_list_head;
             while (cur != 0) {
-                const bh = readBlockHeader(cur);
+                const bh = layout.load(Memory, BlockHeader, cur);
                 if (bh.size >= padded) {
                     if (prev == 0) {
                         gh.free_list_head = bh.next_free;
                     } else {
-                        var pbh = readBlockHeader(prev);
+                        var pbh = layout.load(Memory, BlockHeader, prev);
                         pbh.next_free = bh.next_free;
-                        writeBlockHeader(prev, pbh);
+                        layout.store(Memory, BlockHeader, prev, pbh);
                     }
-                    writeBlockHeader(cur, .{ .size = bh.size, .next_free = 0 });
-                    self.writeGlobalHeader(gh);
+                    layout.store(Memory, BlockHeader, cur, .{ .size = bh.size, .next_free = 0 });
+                    layout.store(Memory, GlobalHeader, self.base, gh);
                     return cur + block_header_size;
                 }
                 prev = cur;
@@ -115,9 +104,9 @@ pub fn Allocator(comptime Memory: type) type {
                 _ = try Memory.grow(required_pages - current_pages);
             }
 
-            writeBlockHeader(block_start, .{ .size = padded, .next_free = 0 });
+            layout.store(Memory, BlockHeader, block_start, .{ .size = padded, .next_free = 0 });
             gh.next_offset = new_next;
-            self.writeGlobalHeader(gh);
+            layout.store(Memory, GlobalHeader, self.base, gh);
 
             return data_start;
         }
@@ -128,13 +117,13 @@ pub fn Allocator(comptime Memory: type) type {
             if (offset == 0) return;
 
             const block_start = offset - block_header_size;
-            var gh = self.readGlobalHeader();
-            var bh = readBlockHeader(block_start);
+            var gh = layout.load(Memory, GlobalHeader, self.base);
+            var bh = layout.load(Memory, BlockHeader, block_start);
 
             bh.next_free = gh.free_list_head;
-            writeBlockHeader(block_start, bh);
+            layout.store(Memory, BlockHeader, block_start, bh);
             gh.free_list_head = block_start;
-            self.writeGlobalHeader(gh);
+            layout.store(Memory, GlobalHeader, self.base, gh);
         }
 
         /// Read data from stable memory at `offset` into `buf`.
@@ -145,42 +134,6 @@ pub fn Allocator(comptime Memory: type) type {
         /// Write `data` to stable memory at `offset`.
         pub fn write(offset: u64, data: []const u8) void {
             Memory.write(offset, data);
-        }
-
-        fn readGlobalHeader(self: Self) GlobalHeader {
-            var buf: [global_header_size]u8 = undefined;
-            Memory.read(self.base, &buf);
-            return .{
-                .magic_val = std.mem.readInt(u64, buf[0..8], .little),
-                .next_offset = std.mem.readInt(u64, buf[8..16], .little),
-                .free_list_head = std.mem.readInt(u64, buf[16..24], .little),
-                ._reserved = std.mem.readInt(u64, buf[24..32], .little),
-            };
-        }
-
-        fn writeGlobalHeader(self: Self, gh: GlobalHeader) void {
-            var buf: [global_header_size]u8 = undefined;
-            std.mem.writeInt(u64, buf[0..8], gh.magic_val, .little);
-            std.mem.writeInt(u64, buf[8..16], gh.next_offset, .little);
-            std.mem.writeInt(u64, buf[16..24], gh.free_list_head, .little);
-            std.mem.writeInt(u64, buf[24..32], gh._reserved, .little);
-            Memory.write(self.base, &buf);
-        }
-
-        fn readBlockHeader(offset: u64) BlockHeader {
-            var buf: [block_header_size]u8 = undefined;
-            Memory.read(offset, &buf);
-            return .{
-                .size = std.mem.readInt(u64, buf[0..8], .little),
-                .next_free = std.mem.readInt(u64, buf[8..16], .little),
-            };
-        }
-
-        fn writeBlockHeader(offset: u64, bh: BlockHeader) void {
-            var buf: [block_header_size]u8 = undefined;
-            std.mem.writeInt(u64, buf[0..8], bh.size, .little);
-            std.mem.writeInt(u64, buf[8..16], bh.next_free, .little);
-            Memory.write(offset, &buf);
         }
     };
 }
@@ -194,8 +147,8 @@ const TestAllocator = Allocator(testing_memory);
 test "init creates header" {
     testing_memory.reset();
 
-    var a = try TestAllocator.init(0);
-    const gh = a.readGlobalHeader();
+    const a = try TestAllocator.init(0);
+    const gh = layout.load(testing_memory, TestAllocator.GlobalHeader, a.base);
     try std.testing.expectEqual(TestAllocator.magic_value, gh.magic_val);
     try std.testing.expectEqual(TestAllocator.global_header_size, gh.next_offset);
     try std.testing.expectEqual(@as(u64, 0), gh.free_list_head);
@@ -209,9 +162,17 @@ test "init is idempotent" {
     try std.testing.expect(off != 0);
 
     // Re-init should detect existing header and preserve state.
-    var b = try TestAllocator.init(0);
-    const gh = b.readGlobalHeader();
+    const b = try TestAllocator.init(0);
+    const gh = layout.load(testing_memory, TestAllocator.GlobalHeader, b.base);
     try std.testing.expect(gh.next_offset > TestAllocator.global_header_size);
+}
+
+test "init refuses memory that holds something else" {
+    testing_memory.reset();
+
+    testing_memory.pages = 1;
+    testing_memory.write(0, "not an allocator");
+    try std.testing.expectError(error.LayoutMismatch, TestAllocator.init(0));
 }
 
 test "alloc and read/write" {

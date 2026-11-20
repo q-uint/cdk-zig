@@ -3,6 +3,10 @@
 A Zig canister development kit for the [Internet Computer](https://internetcomputer.org/),
 supporting both wasm32 and wasm64 targets.
 
+> [!WARNING]
+> Unreleased. Any commit may break the API, and the layout of stable structures
+> too. A canister upgraded to a newer CDK may not read what an older one wrote.
+
 ## Requirements
 
 Zig 0.17, plus a PocketIC server on `POCKET_IC_BIN` to run the e2e suites.
