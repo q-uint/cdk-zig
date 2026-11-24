@@ -536,9 +536,7 @@ pub fn entryPoint(comptime func: anytype, comptime context: ic0.Context, comptim
 }
 
 // Null stands for an entry point returning void, which checkOutcome reads as
-// one that cannot state an outcome. Where the context allows a reply, void
-// replies with the codec's empty reply, unless the handler sent a call, which
-// checkOutcome traps on.
+// one that cannot state an outcome, so it traps if the handler sent a call.
 fn outcomeOf(
     comptime func: anytype,
     comptime context: ic0.Context,

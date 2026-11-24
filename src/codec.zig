@@ -8,12 +8,8 @@
 //! `a` is freed when the message ends, so neither needs to free anything. An
 //! argument that fails to decode rejects the message, naming the error.
 //!
-//! A handler returning `void` replies with `empty`, if the format declares
-//! it, and with no bytes otherwise:
-//!
-//!     pub const empty: []const u8
-//!
-//! Candid's is `()`, an empty argument list.
+//! A handler returning `void` replies with `pub const empty: []const u8` if
+//! declared, no bytes otherwise.
 
 const std = @import("std");
 const root = @import("root");
