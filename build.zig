@@ -116,6 +116,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     const test_files = [_][]const u8{
+        "src/allocator.zig",
         "src/base32.zig",
         "src/principal.zig",
         "src/pocket_ic.zig",
@@ -153,10 +154,15 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(bls_test).step);
     }
 
-    const e2e_step = b.step("e2e", "Run e2e tests for all examples");
+    const e2e_step = b.step("e2e", "Run e2e tests for all examples and test suites");
     for (examples) |name| {
         const run = b.addSystemCommand(&.{ "zig", "build", "test" });
         run.setCwd(b.path(b.fmt("examples/{s}", .{name})));
+        e2e_step.dependOn(&run.step);
+    }
+    for (suites) |name| {
+        const run = b.addSystemCommand(&.{ "zig", "build", "test" });
+        run.setCwd(b.path(b.fmt("tests/{s}", .{name})));
         e2e_step.dependOn(&run.step);
     }
 }
@@ -201,4 +207,9 @@ const examples = [_][]const u8{
     "profiling",
     "stable",
     "timers",
+};
+
+// Canisters built only to test the CDK, under tests/.
+const suites = [_][]const u8{
+    "call",
 };

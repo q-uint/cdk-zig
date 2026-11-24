@@ -295,5 +295,5 @@ instructions, heap and stable memory. Free when disabled. See
 
 ```
 zig build test     # run unit tests
-zig build e2e      # run all example e2e tests
+zig build e2e      # run the e2e tests of examples/ and tests/
 ```

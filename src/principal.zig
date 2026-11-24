@@ -142,6 +142,22 @@ pub fn comptimeFromText(comptime text: []const u8) Principal {
         @compileError("invalid principal: " ++ text);
 }
 
+/// The canister id the IC allocates at `index`: the index big-endian, then
+/// `0x01` for an opaque id, then `0x01` again.
+pub fn canisterId(index: u64) Principal {
+    var bytes: [10]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], index, .big);
+    bytes[8..].* = .{ 0x01, 0x01 };
+    return .from(&bytes);
+}
+
+test "canisterId" {
+    var buf: [Principal.max_text_len]u8 = undefined;
+    try std.testing.expectEqualStrings("rwlgt-iiaaa-aaaaa-aaaaa-cai", toText(&buf, canisterId(0)));
+    try std.testing.expectEqualStrings("rrkah-fqaaa-aaaaa-aaaaq-cai", toText(&buf, canisterId(1)));
+    try std.testing.expectEqual(Class.unclassified, canisterId(1).class());
+}
+
 test "toText" {
     var buf: [Principal.max_text_len]u8 = undefined;
     try std.testing.expectEqualStrings("aaaaa-aa", toText(&buf, management_canister));

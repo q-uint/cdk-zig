@@ -1,16 +1,32 @@
-//! Instrumentation and deliberately broken flows, for the tests. Not an
-//! example of anything. caller.zig is the example.
+//! Instrumented calls and deliberately broken flows, for test.zig.
 
+const std = @import("std");
 const cdk = @import("cdk");
 
-const caller = @import("caller.zig");
+// The wasm allocator keeps no accounts, so a leak or a dangling slice goes
+// unseen. This one counts every byte handed out.
+var tracking: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .{
+    .backing_allocator = std.heap.wasm_allocator,
+};
 
-// The wasm allocator does no tracking at all: no leak accounting, no
-// poisoning of freed memory, which is why a dangling slice reads as plausible
-// data rather than crashing. caller.zig swaps in a tracking one so this can
-// see what it hides.
+pub const cdk_allocator = tracking.allocator();
+
+// Every allocated byte is counted, so a kept scratch buffer would read as a
+// leak.
+pub const cdk_options = struct {
+    pub const scratch_retain: usize = 0;
+};
+
+var callee_principal: ?cdk.principal.Principal = null;
+
+fn init(arg: []const u8) void {
+    if (arg.len == 0) return;
+    callee_principal = cdk.principal.Principal.tryFrom(arg) catch
+        @panic("invalid principal");
+}
+
 fn outstanding_bytes() u64 {
-    return caller.tracking.total_requested_bytes;
+    return tracking.total_requested_bytes;
 }
 
 // Counts the paths that are otherwise invisible: a rejected second call, and
@@ -30,7 +46,40 @@ const Held = struct {
     }
 };
 
-// These flows only ever reject, so they reply with nothing.
+fn chainedFarewellReplied(
+    scratch: std.mem.Allocator,
+    held: Held,
+    data: []const u8,
+) cdk.Transition([]const u8) {
+    const combined = std.mem.concat(scratch, u8, &.{ held.text, " and ", data }) catch
+        return .reject("out of memory");
+    return .reply(combined);
+}
+
+fn chainedGreetReplied(data: []const u8) cdk.Transition([]const u8) {
+    const callee = callee_principal orelse
+        return .reject("callee principal not set, pass it as init arg");
+    const kept = cdk.persistent.dupe(u8, data) catch return .reject("out of memory");
+    return .commit(.{
+        .onReply = chainedFarewellReplied,
+        .onFinish = Held.deinit,
+    }, .{
+        .callee = callee,
+        .method = "farewell",
+        .pending = Held{ .text = kept },
+    });
+}
+
+fn call_chained() cdk.Transition([]const u8) {
+    const callee = callee_principal orelse
+        return .reject("callee principal not set, pass it as init arg");
+    return .commit(
+        .{ .onReply = chainedGreetReplied },
+        .{ .callee = callee, .method = "greet" },
+    );
+}
+
+// The flows below only ever reject, so they reply with nothing.
 const Probe = cdk.Transition(void);
 
 fn unreachableReply(_: Held, _: []const u8) Probe {
@@ -40,7 +89,7 @@ fn unreachableReply(_: Held, _: []const u8) Probe {
 // Names a method that does not exist, so the reject path runs holding
 // pending state.
 fn rejectingSecondCall(data: []const u8) Probe {
-    const callee = caller.callee_principal orelse
+    const callee = callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
     const kept = cdk.persistent.dupe(u8, data) catch return .reject("out of memory");
     return .commit(.{
@@ -54,7 +103,7 @@ fn rejectingSecondCall(data: []const u8) Probe {
 }
 
 fn call_chained_rejecting() Probe {
-    const callee = caller.callee_principal orelse
+    const callee = callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
     return .commit(
         .{ .onReply = rejectingSecondCall },
@@ -69,7 +118,7 @@ fn trappingReply(_: Held, _: []const u8) Probe {
 }
 
 fn trappingSecondCall(data: []const u8) Probe {
-    const callee = caller.callee_principal orelse
+    const callee = callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
     const kept = cdk.persistent.dupe(u8, data) catch return .reject("out of memory");
     return .commit(.{
@@ -83,7 +132,7 @@ fn trappingSecondCall(data: []const u8) Probe {
 }
 
 fn call_chained_trapping() Probe {
-    const callee = caller.callee_principal orelse
+    const callee = callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
     return .commit(
         .{ .onReply = trappingSecondCall },
@@ -93,9 +142,9 @@ fn call_chained_trapping() Probe {
 
 // A comptime-known callee has no runtime address, so its bytes must land
 // somewhere ic0.call_new can point. Not management_canister, which is empty
-// and needs no address. This canister does not exist, so the reject it earns
-// proves the bytes arrived.
-const absent = cdk.principal.comptimeFromText("tz2ag-zx777-77776-aaabq-cai");
+// and needs no address. The last id is in no subnet's range, so the reject it
+// earns proves the bytes arrived.
+const absent = cdk.principal.canisterId(std.math.maxInt(u64));
 
 fn noSuchCanister(_: []const u8) Probe {
     return .reject("that canister was supposed to be absent");
@@ -120,7 +169,7 @@ fn keptUndecodable(_: Held, reply: cdk.Undecodable) Probe {
 }
 
 fn undecodableCall(comptime handled: bool) Probe {
-    const callee = caller.callee_principal orelse
+    const callee = callee_principal orelse
         return .reject("callee principal not set, pass it as init arg");
     const kept = cdk.persistent.dupe(u8, "pending") catch return .reject("out of memory");
     const spec = if (handled) .{
@@ -147,6 +196,8 @@ fn call_undecodable_trapping() Probe {
 }
 
 comptime {
+    cdk.init(init);
+    cdk.update(call_chained, "call_chained");
     cdk.update(call_undecodable_handled, "call_undecodable_handled");
     cdk.update(call_undecodable_trapping, "call_undecodable_trapping");
     cdk.update(call_comptime_callee, "call_comptime_callee");

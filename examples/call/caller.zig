@@ -1,22 +1,7 @@
 const std = @import("std");
 const cdk = @import("cdk");
 
-// Used by probe.zig, which reads it to spot leaks. cdk_allocator has to be
-// declared in the root source file, so it lives here rather than there.
-pub var tracking: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .{
-    .backing_allocator = std.heap.wasm_allocator,
-};
-
-pub const cdk_allocator = tracking.allocator();
-
-// The probe counts every byte the allocator hands out, so scratch keeps
-// nothing between messages here. Its kept buffer, sized by whichever message
-// ran last, would otherwise read as a leak.
-pub const cdk_options = struct {
-    pub const scratch_retain: usize = 0;
-};
-
-pub var callee_principal: ?cdk.principal.Principal = null;
+var callee_principal: ?cdk.principal.Principal = null;
 
 fn init(arg: []const u8) void {
     if (arg.len == 0) return;
@@ -101,6 +86,4 @@ comptime {
     cdk.update(call_greet, "call_greet");
     cdk.update(call_chained, "call_chained");
     cdk.query(greet, "greet");
-
-    _ = @import("probe.zig");
 }
