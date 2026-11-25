@@ -48,6 +48,18 @@ pub const CandidCodec = struct {
     }
 };
 
+/// CBOR, see `cbor.encode` and `cbor.decode`. A struct declaring `cbor_keys`
+/// is written with integer keys.
+pub const CborCodec = struct {
+    pub fn encode(a: std.mem.Allocator, comptime T: type, value: T) ![]const u8 {
+        return cbor.encodeAlloc(a, value);
+    }
+
+    pub fn decode(a: std.mem.Allocator, comptime T: type, bytes: []const u8) !T {
+        return cbor.decode(T, a, bytes);
+    }
+};
+
 // Export decorators
 pub const init = exp.init;
 pub const query = exp.query;

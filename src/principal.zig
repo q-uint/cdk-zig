@@ -1,5 +1,6 @@
 const std = @import("std");
 const base32 = @import("base32.zig");
+const cbor = @import("cbor.zig");
 
 const assert = @import("assert.zig").assert;
 
@@ -36,6 +37,15 @@ pub const Principal = struct {
 
     pub fn eql(self: Principal, other: Principal) bool {
         return std.mem.eql(u8, self.slice(), other.slice());
+    }
+
+    /// For `cbor`: its bytes, as IC envelopes carry it.
+    pub fn cborEncode(self: *const Principal) cbor.ByteString {
+        return .from(self.slice());
+    }
+
+    pub fn cborDecode(bytes: cbor.ByteString) error{TooLong}!Principal {
+        return tryFrom(bytes.data);
     }
 
     /// For `std.json`: the textual form.
@@ -185,6 +195,25 @@ test "jsonStringify" {
     const json = try std.json.Stringify.valueAlloc(std.testing.allocator, anonymous, .{});
     defer std.testing.allocator.free(json);
     try std.testing.expectEqualStrings("\"2vxsx-fae\"", json);
+}
+
+test "cbor" {
+    const a = std.testing.allocator;
+    const bytes = try cbor.encodeAlloc(a, anonymous);
+    defer a.free(bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0x41, 0x04 }, bytes);
+    try std.testing.expect(anonymous.eql(try cbor.decode(Principal, a, bytes)));
+
+    // As a field, and refused when longer than a principal can be.
+    const Call = struct { sender: Principal };
+    const call = try cbor.encodeAlloc(a, Call{ .sender = management_canister });
+    defer a.free(call);
+    const back = try cbor.decode(Call, a, call);
+    try std.testing.expect(back.sender.eql(management_canister));
+    const long: [Principal.max_bytes + 1]u8 = @splat(1);
+    const too_long = try cbor.encodeAlloc(a, long);
+    defer a.free(too_long);
+    try std.testing.expectError(error.InvalidValue, cbor.decode(Principal, a, too_long));
 }
 
 test "fromText" {

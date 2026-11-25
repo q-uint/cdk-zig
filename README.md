@@ -257,6 +257,22 @@ Supported: `bool`, integers, floats, `[]const u8` (text), optionals, slices
 (vec), structs (record), tagged unions (variant), `Principal`, `Blob`,
 `Service` and func types.
 
+### CBOR
+
+`cdk.CborCodec` follows RFC 8949. Structs are maps keyed by field name, or by
+integer as in minicbor with `cbor_keys`, which survives renames:
+
+```zig
+const Event = struct {
+    at: u64,
+    amount: i64,
+    memo: ?[]const u8 = null,
+    pub const cbor_keys = .{ .at = 0, .amount = 1, .memo = 2 };
+};
+```
+
+`[]const u8` is text. Use `cbor.ByteString` or `[N]u8` for bytes.
+
 ### Profiling
 
 ```zig
