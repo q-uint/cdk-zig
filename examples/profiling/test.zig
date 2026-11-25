@@ -4,26 +4,8 @@ const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
 
-fn initPic() !pic.PocketIc {
-    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
-    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
-}
-
-fn deploy(pocket: *pic.PocketIc, path: []const u8) !cdk.principal.Principal {
-    const wasm = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        path,
-        allocator,
-        .limited(10 * 1024 * 1024),
-    );
-    defer allocator.free(wasm);
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
-    return cid;
-}
-
 fn deployProfiling(pocket: *pic.PocketIc) !cdk.principal.Principal {
-    return deploy(pocket, "zig-out/bin/compute_profiling.wasm");
+    return pocket.deploy("zig-out/bin/compute_profiling.wasm", "");
 }
 
 fn raw(pocket: *pic.PocketIc, cid: cdk.principal.Principal) pic.Canister(cdk.RawCodec) {
@@ -44,7 +26,7 @@ fn hasFrame(trace: *const pic.flamegraph.Trace, name: []const u8) bool {
 }
 
 test "profiling trace produces folded stacks" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
 
     var trace = try profileCompute(&pocket, .instructions);
@@ -59,7 +41,7 @@ test "profiling trace produces folded stacks" {
 }
 
 test "inclusive and exclusive costs" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
 
     var trace = try profileCompute(&pocket, .instructions);
@@ -80,7 +62,7 @@ test "inclusive and exclusive costs" {
 }
 
 test "stable memory flamegraph tracks page growth" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
 
     var trace = try profileCompute(&pocket, .stable_pages);
@@ -94,7 +76,7 @@ test "stable memory flamegraph tracks page growth" {
 }
 
 test "heap memory flamegraph" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
 
     var trace = try profileCompute(&pocket, .heap_bytes);
@@ -106,7 +88,7 @@ test "heap memory flamegraph" {
 }
 
 test "a query is profiled through its update twin" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
 
@@ -120,14 +102,16 @@ test "a query is profiled through its update twin" {
 }
 
 test "a section closes on an early error return" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
 
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
     const profiler = pocket.profiler(cid);
     try profiler.start(.{});
-    const reject = try raw(&pocket, cid).expectReject(.update, "check", @as(u8, 1));
-    defer reject.deinit();
+    _ = try raw(&pocket, cid).expectReject(arena.allocator(), .update, "check", @as(u8, 1));
 
     var trace = try profiler.trace(allocator, .instructions);
     defer trace.deinit();
@@ -137,22 +121,26 @@ test "a section closes on an early error return" {
 }
 
 test "last_call_only keeps one call" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
     const profiler = pocket.profiler(cid);
     const canister = raw(&pocket, cid);
 
     try profiler.start(.{});
-    (try canister.update([]const u8, "compute", {})).deinit();
-    (try canister.update([]const u8, "compute", {})).deinit();
+    _ = try canister.update(a, []const u8, "compute", {});
+    _ = try canister.update(a, []const u8, "compute", {});
     var both = try profiler.trace(allocator, .instructions);
     defer both.deinit();
 
     try profiler.start(.{ .last_call_only = true });
-    (try canister.update([]const u8, "compute", {})).deinit();
-    (try canister.update([]const u8, "compute", {})).deinit();
+    _ = try canister.update(a, []const u8, "compute", {});
+    _ = try canister.update(a, []const u8, "compute", {});
     var last = try profiler.trace(allocator, .instructions);
     defer last.deinit();
 
@@ -169,14 +157,17 @@ fn countLines(trace: *const pic.flamegraph.Trace, stack: []const u8) usize {
 }
 
 test "stop leaves later calls out of the trace" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
     const profiler = pocket.profiler(cid);
     try profiler.start(.{});
     try profiler.stop();
-    (try raw(&pocket, cid).update([]const u8, "compute", {})).deinit();
+    _ = try raw(&pocket, cid).update(arena.allocator(), []const u8, "compute", {});
 
     var trace = try profiler.trace(allocator, .instructions);
     defer trace.deinit();
@@ -184,30 +175,34 @@ test "stop leaves later calls out of the trace" {
 }
 
 test "__set_profiling rejects a malformed argument" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
 
-    const reject = try raw(&pocket, cid).expectReject(.update, "__set_profiling", "\x02\x00");
-    defer reject.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    _ = try raw(&pocket, cid).expectReject(arena.allocator(), .update, "__set_profiling", "\x02\x00");
 }
 
 test "__get_instructions returns the instruction counter" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
-    const count = try raw(&pocket, cid).query(i64, "__get_instructions", {});
-    defer count.deinit();
-    try std.testing.expect(count.value > 0);
+    const count = try raw(&pocket, cid).query(arena.allocator(), i64, "__get_instructions", {});
+    try std.testing.expect(count > 0);
 }
 
 test "tracing disabled by default produces empty trace" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
-    (try raw(&pocket, cid).update([]const u8, "compute", {})).deinit();
+    _ = try raw(&pocket, cid).update(arena.allocator(), []const u8, "compute", {});
 
     var trace = try pocket.profiler(cid).trace(allocator, .instructions);
     defer trace.deinit();
@@ -224,9 +219,9 @@ const BuildMetadata = struct {
 };
 
 fn expectBuildMetadata(path: []const u8, profiling: bool) !void {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-    const cid = try deploy(&pocket, path);
+    const cid = try pocket.deploy(path, "");
 
     const json = try pocket.metadata(cid, "cdk:build") orelse return error.MissingMetadata;
     defer allocator.free(json);
@@ -244,29 +239,30 @@ test "both builds carry cdk:build metadata" {
 }
 
 test "only controllers may call the profiling endpoints" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
     const cid = try deployProfiling(&pocket);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
     const stranger = raw(&pocket, cid).as(cdk.principal.canisterId(42));
-    const query = try stranger.expectReject(.query, "__get_instructions", {});
-    defer query.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, query.value.message, "dev endpoints") != null);
-    const update = try stranger.expectReject(.update, "__set_profiling", "\x01\x00");
-    defer update.deinit();
+    const query = try stranger.expectReject(a, .query, "__get_instructions", {});
+    try std.testing.expect(std.mem.indexOf(u8, query.message, "dev endpoints") != null);
+    _ = try stranger.expectReject(a, .update, "__set_profiling", "\x01\x00");
 
-    const count = try raw(&pocket, cid).query(i64, "__get_instructions", {});
-    defer count.deinit();
+    _ = try raw(&pocket, cid).query(a, i64, "__get_instructions", {});
 }
 
 test "the plain build exports no profiling endpoints" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-    const cid = try deploy(&pocket, "zig-out/bin/compute.wasm");
+    const cid = try pocket.deploy("zig-out/bin/compute.wasm", "");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
     const canister = raw(&pocket, cid);
-    const reject = try canister.expectReject(.update, "__set_profiling", "\x01\x00");
-    defer reject.deinit();
-    const twin = try canister.expectReject(.update, "__profile_get_counter", {});
-    defer twin.deinit();
+    _ = try canister.expectReject(a, .update, "__set_profiling", "\x01\x00");
+    _ = try canister.expectReject(a, .update, "__profile_get_counter", {});
 }

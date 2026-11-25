@@ -4,232 +4,122 @@ const pic = @import("pocket-ic");
 
 const allocator = std.testing.allocator;
 
-fn initPic() !pic.PocketIc {
-    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
-    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
+fn deploy(pocket: *pic.PocketIc, path: []const u8) !pic.Canister(cdk.RawCodec) {
+    return pocket.canister(cdk.RawCodec, try pocket.deploy(path, ""));
 }
 
-fn readWasm() ![]const u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig-out/bin/stable.wasm", allocator, .limited(10 * 1024 * 1024));
+// The offset, then the payload.
+fn writeArg(a: std.mem.Allocator, offset: u64, payload: []const u8) ![]const u8 {
+    return std.mem.concat(a, u8, &.{ &std.mem.toBytes(offset), payload });
 }
 
-fn readWasm64() ![]const u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig-out/bin/stable64.wasm", allocator, .limited(10 * 1024 * 1024));
-}
-
-fn expectReply(
-    pocket: *pic.PocketIc,
-    cid: cdk.principal.Principal,
-    method: []const u8,
-    arg: []const u8,
-    comptime call_type: enum { query, update },
-) ![]const u8 {
-    const result = switch (call_type) {
-        .query => try pocket.queryCall(cid, cdk.principal.anonymous, method, arg),
-        .update => try pocket.updateCall(cid, cdk.principal.anonymous, method, arg),
-    };
-    switch (result) {
-        .reply => |data| return data,
-        .reject => |rej| {
-            defer rej.deinit(allocator);
-            std.debug.print("rejected: {s}\n", .{rej.message});
-            return error.Rejected;
-        },
-    }
+// The offset, then the length.
+fn readArg(offset: u64, len: u64) [16]u8 {
+    return std.mem.toBytes(offset) ++ std.mem.toBytes(len);
 }
 
 test "stable_size starts at zero" {
-    const wasm = try readWasm();
-    defer allocator.free(wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
+    const c = try deploy(&pocket, "zig-out/bin/stable.wasm");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
-
-    const data = try expectReply(&pocket, cid, "get_size", "", .query);
-    defer allocator.free(data);
-
-    const pages = std.mem.readInt(u64, data[0..8], .little);
-    try std.testing.expectEqual(@as(u64, 0), pages);
+    try std.testing.expectEqual(0, try c.query(arena.allocator(), u64, "get_size", {}));
 }
 
 test "grow and size" {
-    const wasm = try readWasm();
-    defer allocator.free(wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
+    const c = try deploy(&pocket, "zig-out/bin/stable.wasm");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
     // Grow by 3 pages, should return old size (0).
-    const grow_reply = try expectReply(&pocket, cid, "grow", &std.mem.toBytes(@as(u64, 3)), .update);
-    defer allocator.free(grow_reply);
-    const old_size = std.mem.readInt(u64, grow_reply[0..8], .little);
-    try std.testing.expectEqual(@as(u64, 0), old_size);
-
-    // Size should now be 3.
-    const size_reply = try expectReply(&pocket, cid, "get_size", "", .query);
-    defer allocator.free(size_reply);
-    const pages = std.mem.readInt(u64, size_reply[0..8], .little);
-    try std.testing.expectEqual(@as(u64, 3), pages);
+    try std.testing.expectEqual(0, try c.update(a, u64, "grow", @as(u64, 3)));
+    try std.testing.expectEqual(3, try c.query(a, u64, "get_size", {}));
 }
 
 test "write and read round-trip" {
-    const wasm = try readWasm();
-    defer allocator.free(wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
+    const c = try deploy(&pocket, "zig-out/bin/stable.wasm");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
-
-    // Grow 1 page.
-    const grow_reply = try expectReply(&pocket, cid, "grow", &std.mem.toBytes(@as(u64, 1)), .update);
-    allocator.free(grow_reply);
-
-    // Write "hello stable" at offset 100.
+    _ = try c.update(a, u64, "grow", @as(u64, 1));
     const payload = "hello stable";
-    var write_arg: [8 + payload.len]u8 = undefined;
-    @memcpy(write_arg[0..8], &std.mem.toBytes(@as(u64, 100)));
-    @memcpy(write_arg[8..], payload);
-    const write_reply = try expectReply(&pocket, cid, "write", &write_arg, .update);
-    allocator.free(write_reply);
-
-    // Read back 12 bytes from offset 100.
-    var read_arg: [16]u8 = undefined;
-    @memcpy(read_arg[0..8], &std.mem.toBytes(@as(u64, 100)));
-    @memcpy(read_arg[8..16], &std.mem.toBytes(@as(u64, payload.len)));
-    const read_reply = try expectReply(&pocket, cid, "read", &read_arg, .query);
-    defer allocator.free(read_reply);
-
-    try std.testing.expectEqualStrings(payload, read_reply);
+    _ = try c.update(a, []const u8, "write", try writeArg(a, 100, payload));
+    const read = try c.query(a, []const u8, "read", &readArg(100, payload.len));
+    try std.testing.expectEqualStrings(payload, read);
 }
 
 test "write and read at page boundary" {
-    const wasm = try readWasm();
-    defer allocator.free(wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
+    const c = try deploy(&pocket, "zig-out/bin/stable.wasm");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
-
-    // Grow 2 pages (128 KiB).
-    const grow_reply = try expectReply(&pocket, cid, "grow", &std.mem.toBytes(@as(u64, 2)), .update);
-    allocator.free(grow_reply);
+    _ = try c.update(a, u64, "grow", @as(u64, 2));
 
     // Write across the page boundary (offset 65534, 4 bytes spans into page 2).
     const boundary_offset: u64 = 64 * 1024 - 2;
     const data = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
-    var write_arg: [8 + data.len]u8 = undefined;
-    @memcpy(write_arg[0..8], &std.mem.toBytes(boundary_offset));
-    @memcpy(write_arg[8..], &data);
-    const write_reply = try expectReply(&pocket, cid, "write", &write_arg, .update);
-    allocator.free(write_reply);
-
-    // Read it back.
-    var read_arg: [16]u8 = undefined;
-    @memcpy(read_arg[0..8], &std.mem.toBytes(boundary_offset));
-    @memcpy(read_arg[8..16], &std.mem.toBytes(@as(u64, data.len)));
-    const read_reply = try expectReply(&pocket, cid, "read", &read_arg, .query);
-    defer allocator.free(read_reply);
-
-    try std.testing.expectEqualSlices(u8, &data, read_reply);
+    _ = try c.update(a, []const u8, "write", try writeArg(a, boundary_offset, &data));
+    const read = try c.query(a, []const u8, "read", &readArg(boundary_offset, data.len));
+    try std.testing.expectEqualSlices(u8, &data, read);
 }
 
 test "streaming writer and reader" {
-    const wasm = try readWasm();
-    defer allocator.free(wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
+    const c = try deploy(&pocket, "zig-out/bin/stable.wasm");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
     // stream_write splits the payload in half internally and writes both.
     const payload = "the quick brown fox jumps over the lazy dog";
-    const sw_reply = try expectReply(&pocket, cid, "stream_write", payload, .update);
-    defer allocator.free(sw_reply);
-    const written = std.mem.readInt(u64, sw_reply[0..8], .little);
-    try std.testing.expectEqual(@as(u64, payload.len), written);
+    try std.testing.expectEqual(payload.len, try c.update(a, u64, "stream_write", payload));
 
     // stream_read from offset 0.
-    const sr_reply = try expectReply(
-        &pocket,
-        cid,
-        "stream_read",
-        &std.mem.toBytes(@as(u64, payload.len)),
-        .query,
-    );
-    defer allocator.free(sr_reply);
-    try std.testing.expectEqualStrings(payload, sr_reply);
+    const read = try c.query(a, []const u8, "stream_read", @as(u64, payload.len));
+    try std.testing.expectEqualStrings(payload, read);
 }
 
 test "counter persists across upgrade" {
-    const wasm = try readWasm();
-    defer allocator.free(wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
+    const c = try deploy(&pocket, "zig-out/bin/stable.wasm");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
-
-    // Increment counter 3 times.
-    for (0..3) |_| {
-        const reply = try expectReply(&pocket, cid, "increment", "", .update);
-        allocator.free(reply);
-    }
-
-    // Verify counter is 3.
-    const before = try expectReply(&pocket, cid, "get_counter", "", .query);
-    defer allocator.free(before);
-    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, before[0..4], .little));
+    for (0..3) |_| _ = try c.update(a, []const u8, "increment", {});
+    try std.testing.expectEqual(3, try c.query(a, u32, "get_counter", {}));
 
     // Upgrade (triggers pre_upgrade -> post_upgrade).
-    try pocket.installCode(cid, wasm, "", .upgrade);
+    try pocket.redeploy(c.id, "zig-out/bin/stable.wasm", .upgrade);
 
     // Counter should survive the upgrade.
-    const after = try expectReply(&pocket, cid, "get_counter", "", .query);
-    defer allocator.free(after);
-    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, after[0..4], .little));
+    try std.testing.expectEqual(3, try c.query(a, u32, "get_counter", {}));
 }
 
 test "wasm64: write and read round-trip" {
-    const wasm = try readWasm64();
-    defer allocator.free(wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
+    const c = try deploy(&pocket, "zig-out/bin/stable64.wasm");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
-
-    // Grow 1 page.
-    const grow_reply = try expectReply(&pocket, cid, "grow", &std.mem.toBytes(@as(u64, 1)), .update);
-    allocator.free(grow_reply);
-
-    // Write "hello wasm64" at offset 100.
+    _ = try c.update(a, u64, "grow", @as(u64, 1));
     const payload = "hello wasm64";
-    var write_arg: [8 + payload.len]u8 = undefined;
-    @memcpy(write_arg[0..8], &std.mem.toBytes(@as(u64, 100)));
-    @memcpy(write_arg[8..], payload);
-    const write_reply = try expectReply(&pocket, cid, "write", &write_arg, .update);
-    allocator.free(write_reply);
-
-    // Read back from offset 100.
-    var read_arg: [16]u8 = undefined;
-    @memcpy(read_arg[0..8], &std.mem.toBytes(@as(u64, 100)));
-    @memcpy(read_arg[8..16], &std.mem.toBytes(@as(u64, payload.len)));
-    const read_reply = try expectReply(&pocket, cid, "read", &read_arg, .query);
-    defer allocator.free(read_reply);
-
-    try std.testing.expectEqualStrings(payload, read_reply);
+    _ = try c.update(a, []const u8, "write", try writeArg(a, 100, payload));
+    const read = try c.query(a, []const u8, "read", &readArg(100, payload.len));
+    try std.testing.expectEqualStrings(payload, read);
 }

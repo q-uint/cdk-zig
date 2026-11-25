@@ -5,77 +5,33 @@ const candid = @import("cdk").candid;
 
 const allocator = std.testing.allocator;
 
-fn initPic() !pic.PocketIc {
-    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
-    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
-}
-
 const Greeting = struct {
     greeting: []const u8,
 };
 
-fn readWasm(name: []const u8) ![]const u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, name, allocator, .limited(10 * 1024 * 1024));
-}
-
 test "callee greet" {
-    const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
-    defer allocator.free(callee_wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
+    const callee_id = try pocket.deploy("zig-out/bin/callee.wasm", "");
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
-    const callee_id = try pocket.createCanister();
-    try pocket.installCode(callee_id, callee_wasm, "", .install);
-
-    const arg = try candid.encode(allocator, .{@as([]const u8, "world")});
-    defer allocator.free(arg);
-
-    const result = try pocket.queryCall(callee_id, cdk.principal.anonymous, "greet", arg);
-    switch (result) {
-        .reply => |data| {
-            defer allocator.free(data);
-            const g = try candid.decode(Greeting, allocator, data);
-            defer allocator.free(g.greeting);
-            try std.testing.expectEqualStrings("hello, world!", g.greeting);
-        },
-        .reject => |rej| {
-            defer rej.deinit(allocator);
-            std.debug.print("rejected: {s}\n", .{rej.message});
-            return error.Rejected;
-        },
-    }
+    const callee = pocket.canister(cdk.CandidCodec, callee_id);
+    const g = try callee.query(arena.allocator(), Greeting, "greet", @as([]const u8, "world"));
+    try std.testing.expectEqualStrings("hello, world!", g.greeting);
 }
 
 test "caller calls callee" {
-    const callee_wasm = try readWasm("zig-out/bin/callee.wasm");
-    defer allocator.free(callee_wasm);
-    const caller_wasm = try readWasm("zig-out/bin/caller.wasm");
-    defer allocator.free(caller_wasm);
-
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    const callee_id = try pocket.createCanister();
-    try pocket.installCode(callee_id, callee_wasm, "", .install);
+    const callee_id = try pocket.deploy("zig-out/bin/callee.wasm", "");
+    const caller_id = try pocket.deploy("zig-out/bin/caller.wasm", try candid.encode(a, .{callee_id}));
 
-    const install_arg = try candid.encode(allocator, .{callee_id});
-    defer allocator.free(install_arg);
-    const caller_id = try pocket.createCanister();
-    try pocket.installCode(caller_id, caller_wasm, install_arg, .install);
-
-    const result = try pocket.updateCall(caller_id, cdk.principal.anonymous, "call_greet", "");
-    switch (result) {
-        .reply => |data| {
-            defer allocator.free(data);
-            const g = try candid.decode(Greeting, allocator, data);
-            defer allocator.free(g.greeting);
-            try std.testing.expectEqualStrings("hello, world!", g.greeting);
-        },
-        .reject => |rej| {
-            defer rej.deinit(allocator);
-            std.debug.print("rejected: {s}\n", .{rej.message});
-            return error.Rejected;
-        },
-    }
+    const caller = pocket.canister(cdk.CandidCodec, caller_id);
+    const g = try caller.update(a, Greeting, "call_greet", {});
+    try std.testing.expectEqualStrings("hello, world!", g.greeting);
 }

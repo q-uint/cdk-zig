@@ -64,25 +64,12 @@ pub const Reject = struct {
     }
 };
 
-/// A decoded reply and the memory it lives in. `deinit` frees both.
-pub fn Owned(comptime T: type) type {
-    return struct {
-        value: T,
-        arena: *std.heap.ArenaAllocator,
-
-        pub fn deinit(self: @This()) void {
-            const child = self.arena.child_allocator;
-            self.arena.deinit();
-            child.destroy(self.arena);
-        }
-    };
-}
-
 pub const CallKind = enum { query, update };
 
 /// One canister and the codec it speaks. Arguments are encoded and replies
 /// decoded with `Codec`, the same `encode`/`decode` pair a canister declares
-/// as `cdk_codec`.
+/// as `cdk_codec`. Replies live in the allocator a call is given, an arena
+/// say, freed once for all of them.
 pub fn Canister(comptime Codec: type) type {
     return struct {
         pic: *PocketIc,
@@ -110,28 +97,28 @@ pub fn Canister(comptime Codec: type) type {
         }
 
         /// Pass `{}` as `arg` for a method that takes none.
-        pub fn query(self: Self, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
-            return self.expectReply(.query, T, method, arg);
+        pub fn query(self: Self, a: Allocator, comptime T: type, method: []const u8, arg: anytype) !T {
+            return self.replyOf(a, T, method, try self.send(.query, method, arg));
         }
 
-        pub fn update(self: Self, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
-            return self.expectReply(.update, T, method, arg);
+        pub fn update(self: Self, a: Allocator, comptime T: type, method: []const u8, arg: anytype) !T {
+            return self.replyOf(a, T, method, try self.send(.update, method, arg));
         }
 
         /// A query exported with `cdk.queryWith(Other, ...)`.
-        pub fn queryWith(self: Self, comptime Other: type, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
-            return self.with(Other).query(T, method, arg);
+        pub fn queryWith(self: Self, a: Allocator, comptime Other: type, comptime T: type, method: []const u8, arg: anytype) !T {
+            return self.with(Other).query(a, T, method, arg);
         }
 
         /// An update exported with `cdk.updateWith(Other, ...)`.
-        pub fn updateWith(self: Self, comptime Other: type, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
-            return self.with(Other).update(T, method, arg);
+        pub fn updateWith(self: Self, a: Allocator, comptime Other: type, comptime T: type, method: []const u8, arg: anytype) !T {
+            return self.with(Other).update(a, T, method, arg);
         }
 
         /// The rejection of a call expected to be rejected. `code` tells a
         /// trap (`CanisterError`) from an explicit reject (`CanisterReject`).
-        pub fn expectReject(self: Self, kind: CallKind, method: []const u8, arg: anytype) !Owned(Reject) {
-            return self.rejectOf(try self.send(kind, method, arg));
+        pub fn expectReject(self: Self, a: Allocator, kind: CallKind, method: []const u8, arg: anytype) !Reject {
+            return self.rejectOf(a, try self.send(kind, method, arg));
         }
 
         /// Submits an update without waiting for it, so a test can put
@@ -142,16 +129,12 @@ pub fn Canister(comptime Codec: type) type {
             return self.pic.submitUpdate(self.id, self.sender, method, try self.encode(scratch.allocator(), arg));
         }
 
-        pub fn awaitUpdate(self: Self, comptime T: type, pending: PocketIc.Pending) !Owned(T) {
-            return self.replyOf(T, "submitted update", try self.pic.awaitUpdate(pending));
+        pub fn awaitUpdate(self: Self, a: Allocator, comptime T: type, pending: PocketIc.Pending) !T {
+            return self.replyOf(a, T, "submitted update", try self.pic.awaitUpdate(pending));
         }
 
-        pub fn awaitReject(self: Self, pending: PocketIc.Pending) !Owned(Reject) {
-            return self.rejectOf(try self.pic.awaitUpdate(pending));
-        }
-
-        fn expectReply(self: Self, kind: CallKind, comptime T: type, method: []const u8, arg: anytype) !Owned(T) {
-            return self.replyOf(T, method, try self.send(kind, method, arg));
+        pub fn awaitReject(self: Self, a: Allocator, pending: PocketIc.Pending) !Reject {
+            return self.rejectOf(a, try self.pic.awaitUpdate(pending));
         }
 
         fn send(self: Self, kind: CallKind, method: []const u8, arg: anytype) !WasmResult {
@@ -169,18 +152,15 @@ pub fn Canister(comptime Codec: type) type {
             return Codec.encode(a, @TypeOf(arg), arg);
         }
 
-        // Moves the reply into a fresh arena before decoding, so a value
-        // that points into it, as a Raw []const u8 or leaky JSON does, stays
-        // valid. Takes ownership of the result either way.
-        fn replyOf(self: Self, comptime T: type, what: []const u8, result: WasmResult) !Owned(T) {
+        // Copies the reply into `a` before decoding, so a value that points
+        // into it, as a Raw []const u8 or leaky JSON does, stays valid.
+        // Takes ownership of the result either way.
+        fn replyOf(self: Self, a: Allocator, comptime T: type, what: []const u8, result: WasmResult) !T {
             const gpa = self.pic.allocator;
             switch (result) {
                 .reply => |data| {
                     defer gpa.free(data);
-                    const owned = try newArena(gpa);
-                    errdefer owned.deinit();
-                    const a = owned.arena.allocator();
-                    return .{ .value = try Codec.decode(a, T, try a.dupe(u8, data)), .arena = owned.arena };
+                    return Codec.decode(a, T, try a.dupe(u8, data));
                 },
                 .reject => |rej| {
                     defer rej.deinit(gpa);
@@ -190,7 +170,7 @@ pub fn Canister(comptime Codec: type) type {
             }
         }
 
-        fn rejectOf(self: Self, result: WasmResult) !Owned(Reject) {
+        fn rejectOf(self: Self, a: Allocator, result: WasmResult) !Reject {
             const gpa = self.pic.allocator;
             switch (result) {
                 .reply => |data| {
@@ -199,31 +179,21 @@ pub fn Canister(comptime Codec: type) type {
                 },
                 .reject => |rej| {
                     defer rej.deinit(gpa);
-                    const owned = try newArena(gpa);
-                    errdefer owned.deinit();
-                    const a = owned.arena.allocator();
-                    return .{ .value = .{
+                    return .{
                         .code = rej.code,
                         .error_code = try a.dupe(u8, rej.error_code),
                         .message = try a.dupe(u8, rej.message),
-                    }, .arena = owned.arena };
+                    };
                 },
             }
         }
     };
 }
 
-fn newArena(gpa: Allocator) !Owned(void) {
-    const arena = try gpa.create(std.heap.ArenaAllocator);
-    arena.* = .init(gpa);
-    return .{ .value = {}, .arena = arena };
-}
-
 pub const PocketIcConfig = struct {
     server_url: ?[]const u8 = null,
     // Path to the pocket-ic server binary. Required unless server_url is set.
-    // The caller reads this from the environment (e.g. POCKET_IC_BIN); the
-    // library does not access the process environment itself.
+    // `init` does not read the environment, `initTesting` reads POCKET_IC_BIN.
     bin_path: ?[]const u8 = null,
     application_subnets: u32 = 1,
     nns: bool = false,
@@ -293,6 +263,33 @@ pub const PocketIc = struct {
             .process = process,
             .io = io,
         };
+    }
+
+    /// For tests: a server from `POCKET_IC_BIN`, or the test skipped when
+    /// it is not set.
+    pub fn initTesting() !PocketIc {
+        const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
+        return init(std.testing.io, std.testing.allocator, .{ .bin_path = bin });
+    }
+
+    /// Creates a canister and installs the wasm at `path` with `arg`.
+    pub fn deploy(self: *PocketIc, path: []const u8, arg: []const u8) !principal.Principal {
+        const wasm = try self.readWasm(path);
+        defer self.allocator.free(wasm);
+        const id = try self.createCanister();
+        try self.installCode(id, wasm, arg, .install);
+        return id;
+    }
+
+    /// Reinstalls or upgrades `id` to the wasm at `path`, with no argument.
+    pub fn redeploy(self: *PocketIc, id: principal.Principal, path: []const u8, mode: InstallMode) !void {
+        const wasm = try self.readWasm(path);
+        defer self.allocator.free(wasm);
+        try self.installCode(id, wasm, "", mode);
+    }
+
+    fn readWasm(self: *PocketIc, path: []const u8) ![]u8 {
+        return std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(10 * 1024 * 1024));
     }
 
     pub fn deinit(self: *PocketIc) void {
@@ -687,7 +684,7 @@ pub const PocketIc = struct {
 
     /// What the canister printed with `cdk.print`, and its trap messages,
     /// oldest first.
-    pub fn canisterLogs(self: *PocketIc, canister_id: principal.Principal, as: As) !Owned([]const LogRecord) {
+    pub fn canisterLogs(self: *PocketIc, a: Allocator, canister_id: principal.Principal, as: As) ![]const LogRecord {
         const Logs = struct {
             canister_log_records: []const struct {
                 idx: u64,
@@ -701,16 +698,13 @@ pub const PocketIc = struct {
         const reply = try self.managementQuery("fetch_canister_logs", payload, canister_id, as);
         defer self.allocator.free(reply);
 
-        const owned = try newArena(self.allocator);
-        errdefer owned.deinit();
-        const a = owned.arena.allocator();
-        const logs = candid.decode(Logs, a, reply) catch return error.CandidDecodingFailed;
+        const logs = candid.decode(Logs, a, try a.dupe(u8, reply)) catch return error.CandidDecodingFailed;
 
         const records = try a.alloc(LogRecord, logs.canister_log_records.len);
         for (logs.canister_log_records, records) |raw, *record| {
             record.* = .{ .idx = raw.idx, .timestamp_nanos = raw.timestamp_nanos, .content = raw.content.data };
         }
-        return .{ .value = records, .arena = owned.arena };
+        return records;
     }
 
     fn onCanister(self: *PocketIc, method: []const u8, canister_id: principal.Principal, as: As) !void {

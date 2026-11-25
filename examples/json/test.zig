@@ -10,80 +10,65 @@ const Entry = struct {
     value: []const u8,
 };
 
-fn initPic() !pic.PocketIc {
-    const bin = std.testing.environ.getPosix("POCKET_IC_BIN") orelse return error.SkipZigTest;
-    return pic.PocketIc.init(std.testing.io, allocator, .{ .bin_path = bin });
-}
-
-fn install(pocket: *pic.PocketIc) !cdk.principal.Principal {
-    const wasm = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig-out/bin/json.wasm", allocator, .limited(10 * 1024 * 1024));
-    defer allocator.free(wasm);
-    const cid = try pocket.createCanister();
-    try pocket.installCode(cid, wasm, "", .install);
-    return cid;
-}
-
-fn put(store: pic.Canister(Json), entry: Entry) !u64 {
-    const count = try store.update(u64, "put", entry);
-    defer count.deinit();
-    return count.value;
-}
-
 test "put, get and list speak JSON" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-    const store = pocket.canister(Json, try install(&pocket));
+    const store = pocket.canister(Json, try pocket.deploy("zig-out/bin/json.wasm", ""));
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    try std.testing.expectEqual(@as(u64, 1), try put(store, .{ .key = "color", .value = "blue" }));
-    try std.testing.expectEqual(@as(u64, 2), try put(store, .{ .key = "shape", .value = "round" }));
+    try std.testing.expectEqual(1, try store.update(a, u64, "put", Entry{ .key = "color", .value = "blue" }));
+    try std.testing.expectEqual(2, try store.update(a, u64, "put", Entry{ .key = "shape", .value = "round" }));
     // Overwriting keeps the count.
-    try std.testing.expectEqual(@as(u64, 2), try put(store, .{ .key = "color", .value = "green" }));
+    try std.testing.expectEqual(2, try store.update(a, u64, "put", Entry{ .key = "color", .value = "green" }));
 
-    const color = try store.query([]const u8, "get", @as([]const u8, "color"));
-    defer color.deinit();
-    try std.testing.expectEqualStrings("green", color.value);
+    const color = try store.query(a, []const u8, "get", @as([]const u8, "color"));
+    try std.testing.expectEqualStrings("green", color);
 
-    const entries = try store.query([]const Entry, "list", {});
-    defer entries.deinit();
-    try std.testing.expectEqual(@as(usize, 2), entries.value.len);
-    try std.testing.expectEqualStrings("color", entries.value[0].key);
-    try std.testing.expectEqualStrings("green", entries.value[0].value);
-    try std.testing.expectEqualStrings("shape", entries.value[1].key);
-    try std.testing.expectEqualStrings("round", entries.value[1].value);
+    const entries = try store.query(a, []const Entry, "list", {});
+    try std.testing.expectEqual(2, entries.len);
+    try std.testing.expectEqualStrings("color", entries[0].key);
+    try std.testing.expectEqualStrings("green", entries[0].value);
+    try std.testing.expectEqualStrings("shape", entries[1].key);
+    try std.testing.expectEqualStrings("round", entries[1].value);
 }
 
 test "a missing key rejects with the error's name" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-    const store = pocket.canister(Json, try install(&pocket));
+    const store = pocket.canister(Json, try pocket.deploy("zig-out/bin/json.wasm", ""));
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
-    const rej = try store.expectReject(.query, "get", @as([]const u8, "size"));
-    defer rej.deinit();
-    try std.testing.expectEqual(pic.RejectCode.CanisterReject, rej.value.code);
-    try std.testing.expectEqualStrings("NoSuchKey", rej.value.message);
+    const rej = try store.expectReject(arena.allocator(), .query, "get", @as([]const u8, "size"));
+    try std.testing.expectEqual(pic.RejectCode.CanisterReject, rej.code);
+    try std.testing.expectEqualStrings("NoSuchKey", rej.message);
 }
 
 test "a malformed argument rejects instead of trapping" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-    const store = pocket.canister(Json, try install(&pocket));
+    const store = pocket.canister(Json, try pocket.deploy("zig-out/bin/json.wasm", ""));
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
     // Raw, to send bytes that are not JSON.
-    const rej = try store.with(cdk.RawCodec).expectReject(.update, "put", @as([]const u8, "{not json"));
-    defer rej.deinit();
+    const raw = store.with(cdk.RawCodec);
+    const rej = try raw.expectReject(arena.allocator(), .update, "put", @as([]const u8, "{not json"));
     // A reject, not a trap.
-    try std.testing.expectEqual(pic.RejectCode.CanisterReject, rej.value.code);
-    try std.testing.expect(std.mem.startsWith(u8, rej.value.message, "cdk: could not decode the argument"));
+    try std.testing.expectEqual(pic.RejectCode.CanisterReject, rej.code);
+    try std.testing.expect(std.mem.startsWith(u8, rej.message, "cdk: could not decode the argument"));
 }
 
 test "count overrides the codec with Raw" {
-    var pocket = try initPic();
+    var pocket = try pic.PocketIc.initTesting();
     defer pocket.deinit();
-    const store = pocket.canister(Json, try install(&pocket));
+    const store = pocket.canister(Json, try pocket.deploy("zig-out/bin/json.wasm", ""));
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
 
-    _ = try put(store, .{ .key = "color", .value = "blue" });
-
-    const count = try store.queryWith(cdk.RawCodec, u64, "count", {});
-    defer count.deinit();
-    try std.testing.expectEqual(@as(u64, 1), count.value);
+    _ = try store.update(a, u64, "put", Entry{ .key = "color", .value = "blue" });
+    try std.testing.expectEqual(1, try store.queryWith(a, cdk.RawCodec, u64, "count", {}));
 }
