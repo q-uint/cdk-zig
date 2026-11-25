@@ -216,6 +216,48 @@ test "tracing disabled by default produces empty trace" {
     try std.testing.expectEqual(@as(i64, 0), trace.total_cost);
 }
 
+const BuildMetadata = struct {
+    version: []const u8,
+    profiling: bool,
+    dev_access: std.json.Value,
+};
+
+fn expectBuildMetadata(path: []const u8, profiling: bool) !void {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deploy(&pocket, path);
+
+    const json = try pocket.metadata(cid, "cdk:build") orelse return error.MissingMetadata;
+    defer allocator.free(json);
+    const parsed = try std.json.parseFromSlice(BuildMetadata, allocator, json, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings(cdk.version, parsed.value.version);
+    try std.testing.expectEqual(profiling, parsed.value.profiling);
+    try std.testing.expect(parsed.value.dev_access.object.contains("controllers"));
+}
+
+test "both builds carry cdk:build metadata" {
+    try expectBuildMetadata("zig-out/bin/compute.wasm", false);
+    try expectBuildMetadata("zig-out/bin/compute_profiling.wasm", true);
+}
+
+test "only controllers may call the profiling endpoints" {
+    var pocket = try initPic();
+    defer pocket.deinit();
+    const cid = try deployProfiling(&pocket);
+
+    const stranger = raw(&pocket, cid).as(cdk.principal.canisterId(42));
+    const query = try stranger.expectReject(.query, "__get_instructions", {});
+    defer query.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, query.value.message, "dev endpoints") != null);
+    const update = try stranger.expectReject(.update, "__set_profiling", "\x01\x00");
+    defer update.deinit();
+
+    const count = try raw(&pocket, cid).query(i64, "__get_instructions", {});
+    defer count.deinit();
+}
+
 test "the plain build exports no profiling endpoints" {
     var pocket = try initPic();
     defer pocket.deinit();

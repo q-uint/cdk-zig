@@ -1016,6 +1016,25 @@ pub const PocketIc = struct {
         };
     }
 
+    /// The canister's metadata section `name`, or null if it has none. The
+    /// caller frees it. Read as the anonymous principal, so a private section
+    /// needs that to be a controller, as it is after `createCanister`.
+    pub fn metadata(
+        self: *PocketIc,
+        canister_id: principal.Principal,
+        name: []const u8,
+    ) !?[]u8 {
+        const path: []const []const u8 = &.{ "canister", canister_id.slice(), "metadata", name };
+        var cert = try self.readStateCertificate(canister_id, &.{path});
+        defer cert.deinit();
+        const root = cert.tree.root orelse return error.InvalidReadStateResponse;
+        return switch (root.lookupPath(path)) {
+            .found => |bytes| try self.allocator.dupe(u8, bytes),
+            .absent => null,
+            .unknown => error.InvalidReadStateResponse,
+        };
+    }
+
     fn findRawTreeBytes(map_content: []const u8) ![]const u8 {
         return try cbor.mapLookupRaw(map_content, "tree") orelse error.InvalidCbor;
     }

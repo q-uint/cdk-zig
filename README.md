@@ -275,6 +275,12 @@ instructions, heap and stable memory. Free when disabled. See
   `wasm32-freestanding`, or wasm64 with `.{ .wasm64 = true }`. With
   `.{ .profiling = true }` it also builds `{name}_profiling.wasm`. Returns
   the plain canister's `*Compile` step.
+- `.dev_access` sets who may call the `__` endpoints: `.controllers` (the
+  default), `.anyone`, or `.{ .principals = ... }` in addition to the
+  controllers.
+- Each wasm carries a private `cdk:build` metadata section, JSON with the cdk
+  version, whether it profiles, and its `dev_access`. Only controllers can
+  read it.
 - `addTests(b, dep)` adds a `test` step running `test.zig` against PocketIC.
   Returns the `*Run` step. `pocket.canister(Codec, id)` gives typed calls, see
   [examples/json](examples/json/test.zig).

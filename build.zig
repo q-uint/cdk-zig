@@ -1,14 +1,40 @@
 const std = @import("std");
 
+const version = @import("build.zig.zon").version;
+
+pub const principal = @import("src/principal.zig");
+
 pub const CanisterOptions = struct {
     wasm64: bool = false,
     root_source_file: ?[]const u8 = null,
     /// Also build `{name}_profiling.wasm`, the same canister with profiling
     /// on.
     profiling: bool = false,
+    /// Who may call the `__` endpoints of the profiling build.
+    dev_access: DevAccess = .controllers,
+};
+
+pub const DevAccess = union(enum) {
+    /// The canister's controllers.
+    controllers,
+    /// Anyone, for a local replica or PocketIC.
+    anyone,
+    /// The controllers and these principals, e.g.
+    /// `&.{cdk.principal.comptimeFromText("2vxsx-fae")}`.
+    principals: []const principal.Principal,
+};
+
+/// How a wasm was built. Each carries it in a `cdk:build` section.
+pub const Metadata = struct {
+    version: []const u8 = version,
+    profiling: bool = false,
+    dev_access: DevAccess = .controllers,
 };
 
 /// Returns the plain canister's `*Compile`, also with `.profiling`.
+///
+/// Each wasm carries its `Metadata` as JSON in a private `cdk:build` section.
+/// Controllers read it from `read_state` at `/canister/<id>/metadata/cdk:build`.
 pub fn addCanister(
     b: *std.Build,
     dep: *std.Build.Dependency,
@@ -16,31 +42,46 @@ pub fn addCanister(
     options: CanisterOptions,
 ) *std.Build.Step.Compile {
     const source = options.root_source_file orelse b.fmt("{s}.zig", .{name});
-    const exe = addWasm(b, dep.module("cdk"), name, source, options.wasm64);
+    const plain: Metadata = .{ .dev_access = options.dev_access };
+    const exe = addWasm(b, dep, dep.module("cdk"), name, source, options.wasm64, plain);
     if (options.profiling) {
+        const variant: Metadata = .{ .profiling = true, .dev_access = options.dev_access };
         // The cdk module is shared, so the profiling build gets its own copy
         // reading a different cdk_build_options.
         const cdk_mod = b.createModule(.{
             .root_source_file = dep.path("src/cdk.zig"),
-            .imports = &.{.{ .name = "cdk_build_options", .module = buildOptions(b, true) }},
+            .imports = &.{.{ .name = "cdk_build_options", .module = buildOptions(b, variant) }},
         });
-        _ = addWasm(b, cdk_mod, b.fmt("{s}_profiling", .{name}), source, options.wasm64);
+        const variant_name = b.fmt("{s}_profiling", .{name});
+        _ = addWasm(b, dep, cdk_mod, variant_name, source, options.wasm64, variant);
     }
     return exe;
 }
 
-fn buildOptions(b: *std.Build, profiling: bool) *std.Build.Module {
+fn buildOptions(b: *std.Build, variant: Metadata) *std.Build.Module {
     const options = b.addOptions();
-    options.addOption(bool, "profiling", profiling);
+    options.addOption([]const u8, "version", variant.version);
+    options.addOption(bool, "profiling", variant.profiling);
+    options.addOption(bool, "dev_access_anyone", variant.dev_access == .anyone);
+    // Each principal's bytes, rebuilt with Principal.from in the cdk.
+    var principals: std.ArrayList([]const u8) = .empty;
+    if (variant.dev_access == .principals) {
+        for (variant.dev_access.principals) |*p| {
+            principals.append(b.allocator, p.slice()) catch @panic("OOM");
+        }
+    }
+    options.addOption([]const []const u8, "dev_access_principals", principals.items);
     return options.createModule();
 }
 
 fn addWasm(
     b: *std.Build,
+    dep: *std.Build.Dependency,
     cdk_mod: *std.Build.Module,
     name: []const u8,
     source: []const u8,
     wasm64: bool,
+    variant: Metadata,
 ) *std.Build.Step.Compile {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = if (wasm64) .wasm64 else .wasm32,
@@ -59,7 +100,15 @@ fn addWasm(
     exe.entry = .disabled;
     exe.rdynamic = true;
 
-    const install = b.addInstallArtifact(exe, .{});
+    const file = b.fmt("{s}.wasm", .{name});
+    const section = b.addRunArtifact(dep.artifact("wasm_section"));
+    section.addFileArg(exe.getEmittedBin());
+    const with_section = section.addOutputFileArg(file);
+    section.addArg("icp:private cdk:build");
+    const json = std.json.Stringify.valueAlloc(b.allocator, variant, .{}) catch @panic("OOM");
+    section.addArg(json);
+
+    const install = b.addInstallBinFile(with_section, file);
     b.getInstallStep().dependOn(&install.step);
 
     return exe;
@@ -94,11 +143,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const default_options = buildOptions(b, false);
+    const default_options = buildOptions(b, .{});
     const cdk_mod = b.addModule("cdk", .{
         .root_source_file = b.path("src/cdk.zig"),
         .imports = &.{.{ .name = "cdk_build_options", .module = default_options }},
     });
+
+    // Appends the cdk:build section in addCanister.
+    b.installArtifact(b.addExecutable(.{
+        .name = "wasm_section",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm_section.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    }));
 
     const blst_dep_lib = b.dependency("blst", .{});
     const bls_mod_lib = b.addModule("bls", .{
@@ -124,6 +183,7 @@ pub fn build(b: *std.Build) void {
         "src/candid_tests.zig",
         "src/cbor.zig",
         "src/hash_tree.zig",
+        "src/wasm_section.zig",
     };
     for (test_files) |file| {
         const mod = b.createModule(.{

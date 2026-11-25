@@ -30,6 +30,9 @@ A profiling build traces every entry point and exports:
 A query's trace is rolled back with the rest of its state, so each query is
 also exported as an update that keeps it.
 
+Only controllers may call the `__` endpoints other than `__profile_<query>`.
+Use `.dev_access` in `addCanister` to allow `.anyone` or more principals.
+
 Each trace entry records three metrics:
 
 - **Instructions**, from `performance_counter`

@@ -1,5 +1,8 @@
+const build_options = @import("cdk_build_options");
+const cdk = @import("cdk.zig");
 const codec = @import("codec.zig");
 const ic0 = @import("ic0.zig");
+const principal = @import("principal.zig");
 const profiling = @import("profiling.zig");
 const transition = @import("transition.zig");
 
@@ -64,11 +67,40 @@ pub fn onLowWasmMemory(comptime func: anytype) void {
 // The profiling endpoints speak Raw whatever cdk_codec the canister declares,
 // so the flamegraph tooling can read any canister.
 fn rawQuery(comptime func: anytype, comptime name: []const u8) void {
-    @export(&callConvWrapper(transition.entryPoint(func, .RQ, codec.Raw)), .{ .name = "canister_query " ++ name });
+    const entry = devOnly(transition.entryPoint(func, .RQ, codec.Raw));
+    @export(&callConvWrapper(entry), .{ .name = "canister_query " ++ name });
 }
 
 fn rawUpdate(comptime func: anytype, comptime name: []const u8) void {
-    @export(&callConvWrapper(transition.entryPoint(func, .U, codec.Raw)), .{ .name = "canister_update " ++ name });
+    const entry = devOnly(transition.entryPoint(func, .U, codec.Raw));
+    @export(&callConvWrapper(entry), .{ .name = "canister_update " ++ name });
+}
+
+const dev_principals = blk: {
+    const raw = build_options.dev_access_principals;
+    var ps: [raw.len]principal.Principal = undefined;
+    for (raw, &ps) |bytes, *p| p.* = .from(bytes);
+    break :blk ps;
+};
+
+// Rejects callers that `dev_access` in addCanister does not allow.
+fn devOnly(comptime entry: fn () void) fn () void {
+    if (build_options.dev_access_anyone) return entry;
+    return struct {
+        fn f() void {
+            if (!devAllowed(cdk.caller())) {
+                const msg = "cdk: caller may not call dev endpoints";
+                ic0.msg_reject(msg.ptr, msg.len);
+                return;
+            }
+            entry();
+        }
+    }.f;
+}
+
+fn devAllowed(caller: principal.Principal) bool {
+    for (dev_principals) |p| if (p.eql(caller)) return true;
+    return cdk.isController(caller);
 }
 
 comptime {

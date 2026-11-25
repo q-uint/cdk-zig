@@ -1,5 +1,8 @@
 const std = @import("std");
 
+/// The cdk version this canister was built with.
+pub const version = @import("cdk_build_options").version;
+
 pub const principal = @import("principal.zig");
 pub const ic0 = @import("ic0.zig");
 
