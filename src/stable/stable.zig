@@ -10,6 +10,11 @@ pub const wasm_page_size = memory.wasm_page_size;
 pub const StableAllocator = allocator.StableAllocator;
 pub const StableLog = log.StableLog;
 
+/// A stable log of `T` values, each stored with `Codec`.
+pub fn TypedLog(comptime T: type, comptime Codec: type) type {
+    return log.Typed(memory, T, Codec);
+}
+
 // Re-export the memory read/write/size/grow functions.
 pub const size = memory.size;
 pub const grow = memory.grow;

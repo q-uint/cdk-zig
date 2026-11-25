@@ -10,7 +10,10 @@ pub const CanisterOptions = struct {
     /// Also build `{name}_profiling.wasm`, the same canister with profiling
     /// on.
     profiling: bool = false,
-    /// Who may call the `__` endpoints of the profiling build.
+    /// Also build `{name}_inspect.wasm`, exposing the root's `pub` stable
+    /// logs read-only.
+    inspect: bool = false,
+    /// Who may call the `__` endpoints of the profiling and inspect builds.
     dev_access: DevAccess = .controllers,
 };
 
@@ -28,10 +31,12 @@ pub const DevAccess = union(enum) {
 pub const Metadata = struct {
     version: []const u8 = version,
     profiling: bool = false,
+    inspect: bool = false,
     dev_access: DevAccess = .controllers,
 };
 
-/// Returns the plain canister's `*Compile`, also with `.profiling`.
+/// Returns the plain canister's `*Compile`, also with `.profiling` or
+/// `.inspect`.
 ///
 /// Each wasm carries its `Metadata` as JSON in a private `cdk:build` section.
 /// Controllers read it from `read_state` at `/canister/<id>/metadata/cdk:build`.
@@ -46,22 +51,37 @@ pub fn addCanister(
     const exe = addWasm(b, dep, dep.module("cdk"), name, source, options.wasm64, plain);
     if (options.profiling) {
         const variant: Metadata = .{ .profiling = true, .dev_access = options.dev_access };
-        // The cdk module is shared, so the profiling build gets its own copy
-        // reading a different cdk_build_options.
-        const cdk_mod = b.createModule(.{
-            .root_source_file = dep.path("src/cdk.zig"),
-            .imports = &.{.{ .name = "cdk_build_options", .module = buildOptions(b, variant) }},
-        });
-        const variant_name = b.fmt("{s}_profiling", .{name});
-        _ = addWasm(b, dep, cdk_mod, variant_name, source, options.wasm64, variant);
+        addVariant(b, dep, b.fmt("{s}_profiling", .{name}), source, options.wasm64, variant);
+    }
+    if (options.inspect) {
+        const variant: Metadata = .{ .inspect = true, .dev_access = options.dev_access };
+        addVariant(b, dep, b.fmt("{s}_inspect", .{name}), source, options.wasm64, variant);
     }
     return exe;
+}
+
+// The cdk module is shared, so a variant gets its own copy reading a
+// different cdk_build_options.
+fn addVariant(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    name: []const u8,
+    source: []const u8,
+    wasm64: bool,
+    variant: Metadata,
+) void {
+    const cdk_mod = b.createModule(.{
+        .root_source_file = dep.path("src/cdk.zig"),
+        .imports = &.{.{ .name = "cdk_build_options", .module = buildOptions(b, variant) }},
+    });
+    _ = addWasm(b, dep, cdk_mod, name, source, wasm64, variant);
 }
 
 fn buildOptions(b: *std.Build, variant: Metadata) *std.Build.Module {
     const options = b.addOptions();
     options.addOption([]const u8, "version", variant.version);
     options.addOption(bool, "profiling", variant.profiling);
+    options.addOption(bool, "inspect", variant.inspect);
     options.addOption(bool, "dev_access_anyone", variant.dev_access == .anyone);
     // Each principal's bytes, rebuilt with Principal.from in the cdk.
     var principals: std.ArrayList([]const u8) = .empty;
@@ -183,6 +203,7 @@ pub fn build(b: *std.Build) void {
         "src/candid_tests.zig",
         "src/cbor.zig",
         "src/hash_tree.zig",
+        "src/inspect.zig",
         "src/wasm_section.zig",
     };
     for (test_files) |file| {
@@ -263,6 +284,7 @@ const examples = [_][]const u8{
     "call",
     "candid",
     "certified_data",
+    "inspect",
     "json",
     "profiling",
     "stable",

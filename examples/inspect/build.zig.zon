@@ -1,0 +1,13 @@
+.{
+    .name = .inspect,
+    .version = "0.0.0",
+    .fingerprint = 0x3355066b7a1c42e9,
+    .dependencies = .{
+        .cdk = .{ .path = "../.." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "guestbook.zig",
+    },
+}

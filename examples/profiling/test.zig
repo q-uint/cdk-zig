@@ -219,6 +219,7 @@ test "tracing disabled by default produces empty trace" {
 const BuildMetadata = struct {
     version: []const u8,
     profiling: bool,
+    inspect: bool,
     dev_access: std.json.Value,
 };
 

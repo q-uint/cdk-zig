@@ -2,6 +2,7 @@ const build_options = @import("cdk_build_options");
 const cdk = @import("cdk.zig");
 const codec = @import("codec.zig");
 const ic0 = @import("ic0.zig");
+const inspect = @import("inspect.zig");
 const principal = @import("principal.zig");
 const profiling = @import("profiling.zig");
 const transition = @import("transition.zig");
@@ -64,8 +65,8 @@ pub fn onLowWasmMemory(comptime func: anytype) void {
     @export(&callConvWrapper(profiling.traced(entryPoint(func, .T), "canister_on_low_wasm_memory")), .{ .name = "canister_on_low_wasm_memory" });
 }
 
-// The profiling endpoints speak Raw whatever cdk_codec the canister declares,
-// so the flamegraph tooling can read any canister.
+// The dev endpoints speak Raw whatever cdk_codec the canister declares,
+// so tooling can read any canister.
 fn rawQuery(comptime func: anytype, comptime name: []const u8) void {
     const entry = devOnly(transition.entryPoint(func, .RQ, codec.Raw));
     @export(&callConvWrapper(entry), .{ .name = "canister_query " ++ name });
@@ -111,6 +112,12 @@ comptime {
         rawUpdate(profiling.setProfiling, "__set_profiling");
         rawUpdate(profiling.toggleTracing, "__toggle_tracing");
         rawUpdate(profiling.toggleEntry, "__toggle_entry");
+    }
+    if (inspect.enabled) {
+        for (inspect.logs) |name| {
+            rawQuery(inspect.Endpoints(name).len, "__stable_" ++ name ++ "_len");
+            rawQuery(inspect.Endpoints(name).get, "__stable_" ++ name);
+        }
     }
 }
 

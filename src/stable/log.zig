@@ -28,6 +28,8 @@ pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
         const Self = @This();
 
         pub const header_size: u64 = @sizeOf(Header);
+        /// The length of every entry, or null for blobs.
+        pub const fixed_entry_size: ?u64 = entry_size;
 
         const base_len: u64 = 64;
         const max_segments = 64;
@@ -219,6 +221,40 @@ pub fn Log(comptime Memory: type, comptime entry_size: ?u64) type {
 
 /// Default variable-length stable log using the IC stable64 API.
 pub const StableLog = Log(memory, null);
+
+/// A blob log of `T` values, each stored with `C`, a codec as endpoints take.
+pub fn Typed(comptime Memory: type, comptime T: type, comptime C: type) type {
+    const Bytes = Log(Memory, null);
+    return struct {
+        raw: Bytes,
+
+        const Self = @This();
+
+        pub const Entry = T;
+        pub const Codec = C;
+        pub const header_size = Bytes.header_size;
+
+        pub fn init(alloc: sa.Allocator(Memory), base: u64) layout.Error!Self {
+            return .{ .raw = try Bytes.init(alloc, base) };
+        }
+
+        /// Returns its index. The encoding is allocated from `a`.
+        pub fn append(self: *Self, a: std.mem.Allocator, value: T) !u64 {
+            return self.raw.append(try C.encode(a, T, value));
+        }
+
+        /// Entry `index` decoded into memory from `a`, or null past the end.
+        pub fn get(self: Self, a: std.mem.Allocator, index: u64) !?T {
+            const size = self.raw.entrySize(index) orelse return null;
+            const buf = try a.alloc(u8, @intCast(size));
+            return try C.decode(a, T, self.raw.get(index, buf).?);
+        }
+
+        pub fn len(self: Self) u64 {
+            return self.raw.len();
+        }
+    };
+}
 
 const testing_memory = @import("testing.zig");
 const TestAlloc = sa.Allocator(testing_memory);
@@ -471,6 +507,32 @@ test "fixed: getRange spans segments" {
     // Clipped at the end of the log.
     try std.testing.expectEqual(@as(usize, 10), log.getRange(290, &buf).len);
     try std.testing.expectEqual(@as(usize, 0), log.getRange(300, &buf).len);
+}
+
+test "typed: append and get" {
+    // Text as it is, enough to show the codec runs both ways.
+    const Text = struct {
+        pub fn encode(_: std.mem.Allocator, comptime T: type, value: T) ![]const u8 {
+            return value;
+        }
+        pub fn decode(_: std.mem.Allocator, comptime T: type, bytes: []const u8) !T {
+            return bytes;
+        }
+    };
+    const Notes = Typed(testing_memory, []const u8, Text);
+
+    testing_memory.reset();
+    var notes = try Notes.init(try TestAlloc.init(Notes.header_size), 0);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expectEqual(@as(u64, 0), try notes.append(a, "hello"));
+    try std.testing.expectEqual(@as(u64, 1), try notes.append(a, ""));
+    try std.testing.expectEqual(@as(u64, 2), notes.len());
+    try std.testing.expectEqualStrings("hello", (try notes.get(a, 0)).?);
+    try std.testing.expectEqualStrings("", (try notes.get(a, 1)).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), try notes.get(a, 2));
 }
 
 test "init refuses another layout" {

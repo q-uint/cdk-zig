@@ -234,7 +234,8 @@ comptime {
 ```
 
 `cdk.stable.Writer` and `Reader` stream across pages and grow memory as
-needed.
+needed. `cdk.stable.TypedLog(T, Codec)` is an append-only log of `T` values,
+stored with any codec.
 
 ### Candid encoding/decoding
 
@@ -291,11 +292,15 @@ instructions, heap and stable memory. Free when disabled. See
   `wasm32-freestanding`, or wasm64 with `.{ .wasm64 = true }`. With
   `.{ .profiling = true }` it also builds `{name}_profiling.wasm`. Returns
   the plain canister's `*Compile` step.
+- With `.{ .inspect = true }` it also builds `{name}_inspect.wasm`. Each
+  `pub var` stable log of the root gets `__stable_<name>_len` and
+  `__stable_<name>`, the entry at an index as stored. See
+  [examples/inspect](examples/inspect/).
 - `.dev_access` sets who may call the `__` endpoints: `.controllers` (the
   default), `.anyone`, or `.{ .principals = ... }` in addition to the
   controllers.
 - Each wasm carries a private `cdk:build` metadata section, JSON with the cdk
-  version, whether it profiles, and its `dev_access`. Only controllers can
+  version, whether it profiles or inspects, and its `dev_access`. Only controllers can
   read it.
 - `addTests(b, dep)` adds a `test` step running `test.zig` against PocketIC.
   Returns the `*Run` step. `pocket.canister(Codec, id)` gives typed calls, see
@@ -308,6 +313,7 @@ instructions, heap and stable memory. Free when disabled. See
 | [call](examples/call/) | Inter-canister calls, chained, with pending state |
 | [candid](examples/candid/) | Candid-encoded arguments and replies |
 | [certified_data](examples/certified_data/) | Certified data with a hash tree |
+| [inspect](examples/inspect/) | Stable logs read through the inspect build |
 | [json](examples/json/) | A custom JSON codec, and a Raw endpoint beside it |
 | [timers](examples/timers/) | One-shot and repeating timers |
 | [stable](examples/stable/) | Stable memory, raw and streaming, across upgrades |
