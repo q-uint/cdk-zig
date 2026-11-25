@@ -38,6 +38,12 @@ pub const Principal = struct {
         return std.mem.eql(u8, self.slice(), other.slice());
     }
 
+    /// For `std.json`: the textual form.
+    pub fn jsonStringify(self: Principal, jw: anytype) !void {
+        var buf: [max_text_len]u8 = undefined;
+        try jw.write(toText(&buf, self));
+    }
+
     pub fn isAnonymous(self: Principal) bool {
         return self.eql(anonymous);
     }
@@ -173,6 +179,12 @@ test "toText at every length" {
         const round_tripped = try fromText(toText(&text, p));
         try std.testing.expect(p.eql(round_tripped));
     }
+}
+
+test "jsonStringify" {
+    const json = try std.json.Stringify.valueAlloc(std.testing.allocator, anonymous, .{});
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings("\"2vxsx-fae\"", json);
 }
 
 test "fromText" {
